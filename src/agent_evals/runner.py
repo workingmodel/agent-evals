@@ -25,8 +25,9 @@ from pathlib import Path
 
 from .checks import Artifacts
 
-_SKIP = (".git", "node_modules", ".venv", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.pdf", "*.mp4", "*.zip",
-         ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*", "settings.local.json")
+_SKIP = (".git", "node_modules", ".venv", "runs", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.pdf", "*.mp4", "*.zip",
+         ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*", "settings.local.json",
+         ".npmrc", ".pypirc", ".netrc", ".aws", "credentials.json", "secrets.*", "*.p12", "*.pfx", "service-account*.json")
 _KEEP = (".env.example",)  # matches `.env.*` but is a safe template
 FILE_TOOLS = {"Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit"}
 
@@ -105,7 +106,7 @@ def cleanup_auto_memory(auto: str | None, existed_before: set[str]) -> bool:
 def _snapshot(root: Path) -> dict[str, str]:
     out = {}
     for p in root.rglob("*"):
-        if p.is_file():
+        if p.is_file() and not p.is_symlink():  # a link's target may be outside the workspace: don't read it
             out[str(p.relative_to(root))] = hashlib.sha1(p.read_bytes()).hexdigest()
     return out
 
@@ -156,7 +157,10 @@ def run_task(agent_dir: Path, task: dict, cfg: dict, run_dir: Path) -> RunResult
 
 def _run_in(tmp: Path, agent_dir: Path, task: dict, name: str, cfg: dict, run_dir: Path) -> RunResult:
     ws = tmp / agent_dir.name
-    shutil.copytree(agent_dir, ws, ignore=make_ignore(cfg.get("exclude")))
+    # symlinks=True: copy links as links. Following them would pull a link's target (say a secret outside the agent
+    # folder) into the workspace as an ordinary file, where paths-confined could no longer see it; as a link, any
+    # read or write through it resolves outside the workspace and is flagged.
+    shutil.copytree(agent_dir, ws, ignore=make_ignore(cfg.get("exclude")), symlinks=True)
     before = _snapshot(ws)
     # what the run started from: rescore diffs against this, not the (possibly since-edited) agent folder
     snap_path = run_dir / "workspaces" / f"{name}.snapshot.json"

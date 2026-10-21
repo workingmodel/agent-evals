@@ -209,3 +209,50 @@ def test_rescore_multi_sample_prints_incomplete(env, monkeypatch, capsys):
     cli.rescore(rd, False)
     out = capsys.readouterr().out
     assert "INCOMPLETE  t1  pass rate 0.0 (2 samples)" in out
+
+
+# N12 / N11: wider secret exclusions, and earlier runs kept out of the copy
+def test_workspace_excludes_more_credential_files_and_runs_dir(monkeypatch, tmp_path):
+    ag = fake_agent(tmp_path)
+    for name in (".npmrc", ".pypirc", ".netrc", "credentials.json", "secrets.yaml", "secrets.json", "cert.p12", "cert.pfx", "service-account-prod.json"):
+        (ag / name).write_text("s")
+    (ag / ".aws").mkdir()
+    (ag / ".aws" / "credentials").write_text("s")
+    (ag / "runs" / "old").mkdir(parents=True)
+    (ag / "runs" / "old" / "results.json").write_text("{}")
+    (ag / "config.json").write_text("{}")  # similar names that are not credentials stay
+    (ag / "secretsauce.md").write_text("recipe")
+    seen = {}
+
+    def fake(cmd, **kw):
+        seen["names"] = {str(p.relative_to(kw["cwd"])) for p in Path(kw["cwd"]).rglob("*") if p.is_file()}
+        return subprocess.CompletedProcess(cmd, 0, stdout=stream({"type": "result", "result": "x", "usage": {}}), stderr="")
+    monkeypatch.setattr(subprocess, "run", fake)
+    runner.run_task(ag, {"id": "t", "prompt": "p"}, {"model": "m", "exclude": ["*.tmp"]}, tmp_path / "run")
+    assert seen["names"] == {"CLAUDE.md", ".env.example", ".claude/settings.json", "config.json", "secretsauce.md"}
+
+
+# N10: symlinks are copied as links, so a link to a file outside the agent folder is not pulled in
+def test_symlink_is_copied_as_link_and_access_through_it_is_flagged(monkeypatch, tmp_path):
+    ag = fake_agent(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("TOP SECRET")
+    (ag / "notes.md").symlink_to(outside / "secret.txt")
+    (ag / "inside.md").write_text("ok")
+    (ag / "alias.md").symlink_to("inside.md")  # a relative link within the folder keeps working
+    seen = {}
+
+    def fake(cmd, **kw):
+        ws = Path(kw["cwd"])
+        seen["link"], seen["target"] = (ws / "notes.md").is_symlink(), os.readlink(ws / "notes.md")
+        seen["alias"] = (ws / "alias.md").read_text()
+        evs = [tu("Read", file_path=str(ws / "notes.md")), {"type": "result", "result": "x", "usage": {}}]
+        return subprocess.CompletedProcess(cmd, 0, stdout=stream(*evs), stderr="")
+    monkeypatch.setattr(subprocess, "run", fake)
+    rr = runner.run_task(ag, {"id": "t", "prompt": "p"}, {"model": "m"}, tmp_path / "run")
+    assert seen["link"] and seen["target"] == str(outside / "secret.txt") and seen["alias"] == "ok"
+    assert rr.artifacts.outside == [f"Read:{os.path.realpath(outside / 'secret.txt')}"]
+    assert not run_check({"id": "c", "type": "paths_confined"}, rr.artifacts, None).passed
+    snap = json.loads((tmp_path / "run" / "workspaces" / "t.snapshot.json").read_text())
+    assert "notes.md" not in snap["files"] and "alias.md" not in snap["files"] and "inside.md" in snap["files"]
