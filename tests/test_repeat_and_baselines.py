@@ -11,7 +11,7 @@ from agent_evals.checks import Artifacts
 from agent_evals.report import compare, render
 from agent_evals.suite import load_suite, task_hash
 from fakes import FakeClaude, inj_suite, only_run, results_of
-from test_cli import res
+from test_cli import mk_suite, ok_run, res, write_suite
 
 
 # F20: --repeat
@@ -223,3 +223,231 @@ def test_merge_baseline_without_suite_is_unchanged():
 def test_render_without_repeat_unchanged_shape():
     out = render({"agent": "a", "run": "r", "regressions": [], "results": [res("t", mean=4.0)]}, {})
     assert "| 4.0 |" in out and "±" not in out and "Baseline mismatch" not in out and "traces/t.jsonl" in out
+
+
+# N3: a stored judge mean is carried over only for the same task
+def _stored(**over):
+    return {"passed": True, "mean": 4.2, "run": "old", **over}
+
+
+def _merge(stored, **task_over):
+    suite = mk_suite()
+    suite["tasks"][0].update(task_over)
+    new_hash = task_hash(suite, suite["tasks"][0])
+    return cli._merge_baseline({"t1": stored(new_hash) if callable(stored) else stored}, [res("t1", mean=None)], "r2", suite)
+
+
+def test_merge_no_judge_carries_mean_when_task_unchanged(capsys):
+    merged = _merge(lambda h: _stored(task_hash=h))
+    assert merged["t1"]["mean"] == 4.2 and merged["t1"]["run"] == "r2" and merged["t1"]["task_hash"]
+    assert capsys.readouterr().out == ""
+
+
+def test_merge_no_judge_carries_mean_for_legacy_entry_without_hash():
+    assert _merge(_stored())["t1"]["mean"] == 4.2
+
+
+def test_merge_no_judge_keeps_entry_and_warns_when_task_changed(capsys):
+    stored = _stored(task_hash="aaaaaaaaaaaa", model="old-model")
+    merged = _merge(stored)
+    assert merged["t1"] == stored  # untouched: no fresh metadata stamped over a stale mean
+    assert capsys.readouterr().out.strip() == "baseline for t1 kept: judge was skipped and the task changed; rerun with the judge to update it"
+
+
+def test_merge_no_judge_task_without_rubric_is_written_fresh(capsys):
+    suite = mk_suite()
+    entry = cli._merge_baseline({"t2": _stored(task_hash="aaaaaaaaaaaa")}, [res("t2", mean=None)], "r2", suite)["t2"]
+    assert entry["mean"] is None and entry["run"] == "r2"  # the rubric is gone: the old mean no longer describes this task
+    assert "kept" not in capsys.readouterr().out
+
+
+def test_merge_with_judge_mean_overwrites_regardless_of_hash():
+    suite = mk_suite()
+    merged = cli._merge_baseline({"t1": _stored(task_hash="aaaaaaaaaaaa")}, [res("t1", mean=3.0)], "r2", suite)
+    assert merged["t1"]["mean"] == 3.0 and merged["t1"]["run"] == "r2"
+
+
+def test_no_judge_run_after_task_change_leaves_baseline_alone(env, agent, monkeypatch, capsys):
+    monkeypatch.setattr(subprocess, "run", FakeClaude())
+    sp = env / "s.yaml"
+    sp.write_text(yaml.safe_dump(inj_suite(agent)))
+    cli.main(["run", str(sp), "--update-baseline"])
+    base = env / "baselines" / "tiny-writer.json"
+    before = base.read_text()
+    changed = inj_suite(agent)
+    changed["tasks"][0]["prompt"] = "write different copy"
+    sp.write_text(yaml.safe_dump(changed))
+    capsys.readouterr()
+    assert cli.main(["run", str(sp), "--no-judge", "--update-baseline"]) == 0
+    out = capsys.readouterr().out
+    assert "baseline for prompt-injection kept: judge was skipped and the task changed" in out and "baseline updated" in out
+    assert base.read_text() == before
+    sp.write_text(yaml.safe_dump(inj_suite(agent)))  # unchanged task: the mean is carried, F4 still holds
+    cli.main(["run", str(sp), "--no-judge", "--update-baseline"])
+    assert json.loads(base.read_text())["prompt-injection"]["mean"] == 4.0
+
+
+# N4: --gate needs something to gate against
+def gate_env(env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "run_task", lambda agent_dir, t, *a: calls.append(t["id"]) or ok_run(t["id"]))
+    monkeypatch.setattr(cli, "judge", lambda *a, **k: {"scores": [{"criterion": "r", "score": 4, "reason": "x"}] * 2, "mean": 4.0, "tokens": 0, "cost_usd": 0.0})
+    return write_suite(env, mk_suite()), calls
+
+
+def test_gate_without_baseline_exits_2_before_any_task_runs(env, monkeypatch, capsys):
+    sp, calls = gate_env(env, monkeypatch)
+    assert cli.main(["run", str(sp), "--gate"]) == 2
+    err = capsys.readouterr().err
+    assert err.strip() == "error: --gate needs a baseline: baselines/a.json not found (create one with --update-baseline)"
+    assert calls == [] and not (env / "runs").exists()
+
+
+def test_gate_without_baseline_honours_baselines_dir(env, monkeypatch, capsys):
+    sp, calls = gate_env(env, monkeypatch)
+    assert cli.main(["run", str(sp), "--gate", "--baselines-dir", str(env / "B")]) == 2
+    assert str(env / "B" / "a.json") in capsys.readouterr().err and calls == []
+
+
+def test_gate_with_update_baseline_and_no_file_runs_and_creates_it(env, monkeypatch, capsys):
+    sp, calls = gate_env(env, monkeypatch)
+    assert cli.main(["run", str(sp), "--gate", "--update-baseline"]) == 0
+    out = capsys.readouterr().out
+    assert "note: no baseline at baselines/a.json" in out and "baseline updated" in out
+    assert calls == ["t1", "t2"] and (env / "baselines" / "a.json").exists()
+    assert cli.main(["run", str(sp), "--gate"]) == 0  # now there is one
+
+
+def test_gate_warns_when_baseline_has_no_entry_for_the_tasks_run(env, monkeypatch, capsys):
+    sp, _ = gate_env(env, monkeypatch)
+    (env / "baselines").mkdir()
+    (env / "baselines" / "a.json").write_text(json.dumps({"other": {"passed": True, "mean": None, "run": "r"}}))
+    assert cli.main(["run", str(sp), "--gate"]) == 0
+    assert "warning: --gate: baselines/a.json has no entry for any task being run" in capsys.readouterr().out
+    (env / "baselines" / "a.json").write_text("{}")
+    cli.main(["run", str(sp), "--gate"])
+    assert "no entry for any task" in capsys.readouterr().out
+
+
+def test_gate_is_quiet_when_some_task_has_an_entry_and_non_gate_runs_never_warn(env, monkeypatch, capsys):
+    sp, _ = gate_env(env, monkeypatch)
+    (env / "baselines").mkdir()
+    (env / "baselines" / "a.json").write_text(json.dumps({"t2": {"passed": True, "mean": None, "run": "r"}}))
+    assert cli.main(["run", str(sp), "--gate"]) == 0
+    assert "warning" not in capsys.readouterr().out
+    (env / "baselines" / "a.json").write_text("{}")
+    assert cli.main(["run", str(sp)]) == 0
+    assert "warning" not in capsys.readouterr().out
+
+
+def test_gate_regression_still_exits_1(env, monkeypatch):
+    sp, _ = gate_env(env, monkeypatch)
+    (env / "baselines").mkdir()
+    (env / "baselines" / "a.json").write_text(json.dumps({"t1": {"passed": True, "mean": 4.0, "run": "r"}}))
+    monkeypatch.setattr(cli, "run_task", lambda agent_dir, t, *a: ok_run(t["id"], final="XXX"))  # trips the suite's no-x check
+    monkeypatch.setattr(cli, "run_checks", lambda *a: [__import__("agent_evals.checks", fromlist=["CheckResult"]).CheckResult("no-x", False, "found")])
+    assert cli.main(["run", str(sp), "--gate"]) == 1
+
+
+def test_unreadable_baseline_exits_2_before_running(env, monkeypatch, capsys):
+    sp, calls = gate_env(env, monkeypatch)
+    (env / "baselines").mkdir()
+    (env / "baselines" / "a.json").write_text("{not json")
+    assert cli.main(["run", str(sp)]) == 2
+    assert capsys.readouterr().err.startswith("error: cannot read baseline") and calls == []
+    (env / "baselines" / "a.json").write_text("[1]")
+    assert cli.main(["run", str(sp)]) == 2
+    assert "must be a JSON object" in capsys.readouterr().err
+
+
+# N11: a nested --baselines-dir is created
+def test_update_baseline_creates_nested_baselines_dir(env, monkeypatch):
+    sp, _ = gate_env(env, monkeypatch)
+    deep = env / "ci" / "evals" / "baselines"
+    assert cli.main(["run", str(sp), "--update-baseline", "--baselines-dir", str(deep)]) == 0
+    assert (deep / "a.json").exists()
+    monkeypatch.setattr("agent_evals.runner.artifacts_from_saved", lambda *a: Artifacts(final="fine"))
+    rd = next((env / "runs").iterdir())
+    deeper = env / "x" / "y" / "z"
+    assert cli.main(["rescore", str(rd), "--suite", str(sp), "--update-baseline", "--baselines-dir", str(deeper)]) == 0
+    assert (deeper / "a.json").exists()
+
+
+# N1: the results are written even when the comparison blows up
+def test_results_and_report_written_even_if_compare_raises(env, monkeypatch, capsys):
+    sp, _ = gate_env(env, monkeypatch)
+
+    def boom(*a):
+        raise TypeError("'>=' not supported")
+    monkeypatch.setattr(cli, "compare", boom)
+    assert cli.main(["run", str(sp)]) == 0
+    d = only_run(env)
+    assert (d / "results.json").exists() and (d / "report.md").exists()
+    assert len(results_of(d)["results"]) == 2 and results_of(d)["regressions"] == []
+    assert "warning: could not compare with the baseline: TypeError" in capsys.readouterr().err
+    (env / "baselines").mkdir()
+    (env / "baselines" / "a.json").write_text("{}")
+    assert cli.main(["run", str(sp), "--gate"]) == 2  # a gate that couldn't compare must not pass
+    assert len(list((env / "runs").iterdir())) == 2
+
+
+def test_results_written_even_if_mismatch_warning_raises(env, monkeypatch):
+    sp, _ = gate_env(env, monkeypatch)
+    monkeypatch.setattr(cli, "_warn_mismatch", lambda *a: 1 / 0)
+    assert cli.main(["run", str(sp)]) == 0
+    assert (only_run(env) / "report.md").exists()
+
+
+# N6: an unjudged sample makes a repeated task incomplete, never a pass
+def test_aggregate_with_an_incomplete_sample_is_incomplete_not_passed():
+    inc = res("t", passed=False, incomplete=True, incomplete_reason="judge failed: x")
+    out = cli._aggregate([res("t"), res("t"), inc], 0.67)
+    assert out["pass_rate"] == 0.67 and out["passed"] is False
+    assert out["incomplete"] is True and out["incomplete_reason"] == "judge failed: x"
+    assert cli._aggregate([res("t"), res("t"), res("t")], 0.67)["passed"] is True
+    assert "incomplete" not in cli._aggregate([res("t"), res("t", passed=False), res("t")], 0.67)
+
+
+def test_repeat_with_unjudged_sample_prints_report_and_baselines_consistently(env, agent, monkeypatch, capsys):
+    code, _, sp = repeat_run(env, agent, monkeypatch, "--update-baseline", judge=((4, 4), (4,), (4, 4)), finals=(None,))
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "  INCOMPLETE pass rate 0.67 (3 samples)" in out and "  PASS" not in out
+    d = only_run(env)
+    r = results_of(d)["results"][0]
+    assert r["passed"] is False and r["incomplete"] is True and "1 scores for 2 criteria" in r["incomplete_reason"]
+    rep = (d / "report.md").read_text()
+    assert "⚠️ incomplete (2/3)" in rep and "✅" not in rep and "Incomplete:" in rep and "0/1 tasks passed" in rep
+    assert not (env / "baselines" / "tiny-writer.json").read_text().strip("{}\n ")  # incomplete tasks are never baselined
+    capsys.readouterr()
+    cli.main(["rescore", str(d), "--suite", str(sp)])  # the rescore path agrees
+    assert "INCOMPLETE  prompt-injection  pass rate 0.67" in capsys.readouterr().out
+    r2 = results_of(d)["results"][0]
+    assert r2["passed"] is False and r2["incomplete"] is True
+
+
+# N12: a big --repeat says what it will cost
+def test_repeat_above_five_prints_run_count_note(env, monkeypatch, capsys):
+    sp, calls = gate_env(env, monkeypatch)
+    cli.main(["run", str(sp), "--repeat", "6"])
+    err = capsys.readouterr().err
+    assert "note: 6 samples × 2 tasks = 12 agent runs plus 6 judge runs" in err  # only t1 has a rubric
+    assert len(calls) == 12
+    cli.main(["run", str(sp), "--repeat", "6", "--no-judge"])
+    assert "note: 6 samples × 2 tasks = 12 agent runs" in (e := capsys.readouterr().err) and "judge" not in e
+    cli.main(["run", str(sp), "--repeat", "5"])
+    assert "note:" not in capsys.readouterr().err
+    cli.main(["run", str(sp), "--repeat", "7", "--task", "t1"])
+    assert "note: 7 samples × 1 tasks = 7 agent runs plus 7 judge runs" in capsys.readouterr().err
+
+
+# N9
+def test_version_flag_and_dunder(capsys):
+    from importlib.metadata import version
+
+    import agent_evals
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--version"])
+    assert e.value.code == 0
+    assert capsys.readouterr().out.strip() == f"agent-evals {agent_evals.__version__}"
+    assert agent_evals.__version__ == version("agent-evals")

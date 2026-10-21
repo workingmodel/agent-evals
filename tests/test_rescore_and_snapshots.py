@@ -188,3 +188,38 @@ def test_old_trace_without_init_event_rescores_clean(env, agent, monkeypatch):
     assert cli.main(["rescore", str(d)]) == 0
     r = results_of(d)["results"][0]
     assert r["passed"] and next(c for c in r["checks"] if c["id"] == "clean-env")["detail"] == "no init event"
+
+
+# N2: rescore load failures are one line and exit 2
+def test_rescore_missing_dir_or_results_exits_2(env, capsys):
+    assert cli.main(["rescore", str(env / "nonexistent")]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: cannot read") and "results.json" in err and "Traceback" not in err
+    (env / "empty").mkdir()
+    assert cli.main(["rescore", str(env / "empty")]) == 2
+
+
+def test_rescore_invalid_results_json_exits_2(env, capsys):
+    rd = env / "runs" / "x"
+    rd.mkdir(parents=True)
+    for text in ("{not json", "[1]", json.dumps({"agent": "a"})):
+        (rd / "results.json").write_text(text)
+        assert cli.main(["rescore", str(rd)]) == 2
+        assert capsys.readouterr().err.startswith("error: ")
+
+
+def test_rescore_bad_suite_or_baseline_exits_2(env, monkeypatch, capsys):
+    monkeypatch.setattr("agent_evals.runner.artifacts_from_saved", lambda *a: Artifacts(final="fine"))
+    rd = make_run(env, "x")
+    broken = env / "broken.yaml"
+    broken.write_text("agent: [unclosed\n")
+    assert cli.main(["rescore", str(rd), "--suite", str(broken)]) == 2
+    assert capsys.readouterr().err.startswith("error: invalid YAML")
+    bad_key = write_suite(env, mk_suite(pass_mean="high"))
+    assert cli.main(["rescore", str(rd), "--suite", str(bad_key)]) == 2
+    assert "`pass_mean`" in capsys.readouterr().err
+    good = write_suite(env, mk_suite())
+    (env / "baselines").mkdir()
+    (env / "baselines" / "a.json").write_text("{nope")
+    assert cli.main(["rescore", str(rd), "--suite", str(good)]) == 2
+    assert capsys.readouterr().err.startswith("error: cannot read baseline")

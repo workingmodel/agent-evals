@@ -9,7 +9,7 @@
     agent-evals validate suites/*.yaml  # check suites, zero tokens
     agent-evals doctor                  # check the claude CLI, zero tokens
 
-Outputs <runs-dir>/<timestamp>-<agent>/{results.json, report.md, traces/*.jsonl} (default ./runs).
+Outputs <runs-dir>/<timestamp>-<agent>-<id>/{results.json, report.md, traces/, workspaces/} (default ./runs).
 Baselines live in <baselines-dir>/<agent>.json (default ./baselines; commit them).
 """
 from __future__ import annotations
@@ -26,11 +26,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from . import __version__
 from .checks import run_checks
 from .judge import judge
 from .report import compare, render
 from .runner import run_task
-from .suite import load_suite, task_checks, task_hash, validate_suite
+from .suite import SuiteError, load_suite, task_checks, task_hash, validate_suite
 
 FLAGS = ("--json-schema", "--setting-sources", "--strict-mcp-config", "--tools", "--no-session-persistence",
          "--output-format", "--allowedTools", "--disallowedTools", "--permission-mode", "--max-turns")
@@ -62,22 +63,42 @@ def _meta(suite: dict, t: dict, env: dict | None) -> dict:
 
 
 def _merge_baseline(baseline: dict, results: list[dict], run_name: str, suite: dict | None = None) -> dict:
-    """Merge results into the baseline; never lose a stored judge mean, never store incomplete tasks."""
+    """Merge results into the baseline; never store incomplete tasks. A run with no judge mean (--no-judge) keeps the
+    stored mean only if the task is unchanged (same task_hash, or a legacy entry without one); otherwise a rubric task's
+    entry is left as it was, since a fresh entry would pair a stale mean with new metadata."""
     merged = dict(baseline)
     tasks = {t["id"]: t for t in (suite or {}).get("tasks", [])}
     for r in results:
         if not r["run_ok"] or r.get("incomplete"):
             continue
         mean = r["judge"]["mean"]
-        if mean is None and (merged.get(r["task"]) or {}).get("mean") is not None:
-            mean = merged[r["task"]]["mean"]
+        stored = merged.get(r["task"]) or {}
+        meta = _meta(suite, tasks[r["task"]], r.get("env")) if suite and r["task"] in tasks else {}
+        if mean is None and stored.get("mean") is not None:
+            if "task_hash" not in stored or "task_hash" not in meta or stored["task_hash"] == meta["task_hash"]:
+                mean = stored["mean"]
+            elif tasks[r["task"]].get("rubric"):
+                print(f"baseline for {r['task']} kept: judge was skipped and the task changed; rerun with the judge to update it")
+                continue
         entry = {"passed": r["passed"], "mean": mean, "run": run_name}
         if r.get("n", 1) > 1:
             entry |= {"pass_rate": r["pass_rate"], "n": r["n"], "stdev": r["judge"].get("stdev")}
-        if suite and r["task"] in tasks:
-            entry |= _meta(suite, tasks[r["task"]], r.get("env"))
+        entry |= meta
         merged[r["task"]] = entry
     return merged
+
+
+def _load_baseline(path: Path) -> dict:
+    """The stored baseline, {} if there is none yet. Raises ValueError on a file that isn't a JSON object."""
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        raise ValueError(f"cannot read baseline {path}: {e}") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"baseline {path} must be a JSON object")
+    return data
 
 
 def _baseline_mismatches(results: list[dict], baseline: dict, suite: dict) -> list[str]:
@@ -101,6 +122,7 @@ def _aggregate(samples: list[dict], min_pass_rate: float) -> dict:
     """Fold per-sample results into one task result: top-level keys as for a single run, plus n/pass_rate/samples."""
     n = len(samples)
     rate = round(sum(bool(x["passed"]) for x in samples) / n, 2)
+    inc = next((x for x in samples if x.get("incomplete")), None)
     rep = next((x for x in samples if not x["passed"]), samples[0])  # the detail the report shows: a failure if any
     means = [x["judge"]["mean"] for x in samples if x["judge"]["mean"] is not None]
     tok_keys = {k for x in samples for k in x["tokens"]}
@@ -108,7 +130,7 @@ def _aggregate(samples: list[dict], min_pass_rate: float) -> dict:
         **rep,
         "run_ok": any(x["run_ok"] for x in samples),
         "error": next((x["error"] for x in samples if x["error"]), ""),
-        "passed": rate >= min_pass_rate - 1e-9, "pass_rate": rate, "n": n,
+        "passed": rate >= min_pass_rate - 1e-9 and not inc, "pass_rate": rate, "n": n,
         "judge": {**rep["judge"], "mean": round(statistics.fmean(means), 2) if means else None,
                   "stdev": round(statistics.pstdev(means), 2) if means else None,
                   "tokens": sum(x["judge"].get("tokens", 0) for x in samples),
@@ -121,8 +143,7 @@ def _aggregate(samples: list[dict], min_pass_rate: float) -> dict:
     }
     res.pop("incomplete", None)
     res.pop("incomplete_reason", None)
-    inc = next((x for x in samples if x.get("incomplete")), None)
-    if inc:
+    if inc:  # an unjudged sample means the task wasn't fully scored: never a pass, whatever the rate
         res["incomplete"], res["incomplete_reason"] = True, inc.get("incomplete_reason", "")
     return res
 
@@ -140,6 +161,7 @@ def _error_result(t: dict, error: str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="agent-evals")
+    ap.add_argument("--version", action="version", version=f"agent-evals {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="run a suite")
     r.add_argument("suite", type=Path)
@@ -168,7 +190,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "doctor":
         return doctor()
 
-    suite = load_suite(args.suite)
+    try:
+        suite = load_suite(args.suite)
+    except SuiteError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     errors = validate_suite(suite)
     if not errors and args.task:
         valid = [t["id"] for t in suite["tasks"]]
@@ -186,20 +212,36 @@ def main(argv: list[str] | None = None) -> int:
     if args.billing == "api" and not os.environ.get("ANTHROPIC_API_KEY"):
         print("--billing api needs ANTHROPIC_API_KEY set", file=sys.stderr)
         return 2
-    suite["billing"] = args.billing  # run_task reads it from the suite config
     agent = suite["agent"]
     tasks = [t for t in suite["tasks"] if not args.task or t["id"] in args.task]
+    base_path = args.baselines_dir / f"{agent}.json"
+    if args.gate and not base_path.exists():
+        if not args.update_baseline:
+            print(f"error: --gate needs a baseline: {base_path} not found (create one with --update-baseline)", file=sys.stderr)
+            return 2
+        print(f"note: no baseline at {base_path}; nothing to gate against, --update-baseline will create it")
+    try:
+        baseline = _load_baseline(base_path)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if args.gate and base_path.exists() and not any(t["id"] in baseline for t in tasks):
+        print(f"warning: --gate: {base_path} has no entry for any task being run; nothing can regress")
+    suite["billing"] = args.billing  # run_task reads it from the suite config
     run_dir = args.runs_dir / _run_dir_name(agent)
     run_dir.mkdir(parents=True)
     run_dir = run_dir.resolve()
     block = tuple(suite["copy_block"]) if suite.get("copy_block") else None
     pass_mean = suite.get("pass_mean", 3.5)
     n = args.repeat if args.repeat is not None else suite.get("repeat", 1)
+    if n > 5:
+        judged = 0 if args.no_judge else sum(bool(t.get("rubric")) for t in tasks)
+        print(f"note: {n} samples × {len(tasks)} tasks = {n * len(tasks)} agent runs"
+              + (f" plus {n * judged} judge runs" if judged else ""), file=sys.stderr)
 
     results: list[dict] = []
-    base_path = args.baselines_dir / f"{agent}.json"
-    baseline = json.loads(base_path.read_text()) if base_path.exists() else {}
     regressions: list[str] = []
+    compare_error = ""
     try:
         for t in tasks:
             print(f"→ {agent}/{t['id']}: running agent…", flush=True)
@@ -214,23 +256,30 @@ def main(argv: list[str] | None = None) -> int:
                   f"{res['duration_s']}s  {res['turns']} turns  ${res['cost_usd']}"
                   + (f"  {res['error']}" if res["error"] else ""), flush=True)
     finally:  # also on Ctrl-C: keep what we have
-        regressions = compare(results, baseline, suite.get("regression_drop", 0.75), suite.get("regression_pass_drop", 0.34))
         summary = {"agent": agent, "suite": str(args.suite.resolve()), "billing": args.billing, "run": run_dir.name, "results": results, "regressions": regressions}
         if n > 1:
             summary["repeat"] = n
-        _warn_mismatch(summary, baseline, suite)
+        try:  # the results are already paid for: a comparison failure must never stop them being written
+            regressions = summary["regressions"] = compare(results, baseline, suite.get("regression_drop", 0.75), suite.get("regression_pass_drop", 0.34))
+            _warn_mismatch(summary, baseline, suite)
+        except Exception as e:
+            compare_error = f"{type(e).__name__}: {e}"
+            print(f"warning: could not compare with the baseline: {compare_error}", file=sys.stderr)
         (run_dir / "results.json").write_text(json.dumps(summary, indent=2))
         (run_dir / "report.md").write_text(render(summary, suite))
         print(f"\nreport: {run_dir / 'report.md'}")
 
     if args.update_baseline:
-        base_path.parent.mkdir(exist_ok=True)
+        base_path.parent.mkdir(parents=True, exist_ok=True)
         base_path.write_text(json.dumps(_merge_baseline(baseline, results, run_dir.name, suite), indent=2) + "\n")
         print(f"baseline updated: {base_path}")
     if regressions:
         print("REGRESSIONS:\n  " + "\n  ".join(regressions))
         if args.gate:
             return 1
+    if compare_error and args.gate:
+        print("error: --gate could not compare with the baseline", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -296,12 +345,28 @@ def _run_one(t: dict, suite: dict, run_dir: Path, block, pass_mean: float, no_ju
 
 
 def rescore(run_dir: Path, update_baseline: bool, suite_path: Path | None = None, baselines_dir: Path = Path("baselines")) -> int:
-    summary = json.loads((run_dir / "results.json").read_text())
+    try:
+        summary = json.loads((run_dir / "results.json").read_text())
+    except (OSError, ValueError) as e:  # missing dir, missing file, bad JSON
+        print(f"error: cannot read {run_dir / 'results.json'}: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(summary, dict) or not all(k in summary for k in ("agent", "suite", "results")):
+        print(f"error: {run_dir / 'results.json'} is not a results file written by `run`", file=sys.stderr)
+        return 2
     suite_path = suite_path or Path(summary["suite"])  # new runs store an absolute path; old ones are CWD-relative
     if not suite_path.is_file():
         print(f"suite file not found: {suite_path}\n  pass the suite explicitly: agent-evals rescore {run_dir} --suite <path>", file=sys.stderr)
         return 2
-    suite = load_suite(suite_path)
+    try:
+        suite = load_suite(suite_path)
+        baseline = _load_baseline(baselines_dir / f"{summary['agent']}.json")
+    except ValueError as e:  # SuiteError is a ValueError
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    errors = validate_suite(suite)
+    if errors:
+        print("invalid suite:\n  " + "\n  ".join(errors), file=sys.stderr)
+        return 2
     suite["billing"] = summary.get("billing", "subscription")  # clean-env judges apiKeySource against the run's billing
     block = tuple(suite["copy_block"]) if suite.get("copy_block") else None
     pass_mean = suite.get("pass_mean", 3.5)
@@ -322,7 +387,6 @@ def rescore(run_dir: Path, update_baseline: bool, suite_path: Path | None = None
         else:
             _rescore_sample(r, r["task"], t, suite, run_dir, block, pass_mean)
     base_path = baselines_dir / f"{summary['agent']}.json"
-    baseline = json.loads(base_path.read_text()) if base_path.exists() else {}
     # regressions are recomputed against the baseline as it is now (before any --update-baseline below)
     summary["regressions"] = compare(summary["results"], baseline, suite.get("regression_drop", 0.75), suite.get("regression_pass_drop", 0.34))
     _warn_mismatch(summary, baseline, suite)
@@ -331,8 +395,7 @@ def rescore(run_dir: Path, update_baseline: bool, suite_path: Path | None = None
     if summary["regressions"]:
         print("REGRESSIONS:\n  " + "\n  ".join(summary["regressions"]))
     if update_baseline:
-        base_path = baselines_dir / f"{summary['agent']}.json"
-        base_path.parent.mkdir(exist_ok=True)
+        base_path.parent.mkdir(parents=True, exist_ok=True)
         base_path.write_text(json.dumps(_merge_baseline(baseline, summary["results"], run_dir.name, suite), indent=2) + "\n")
         print(f"baseline updated: {base_path}")
     return 0
@@ -369,11 +432,13 @@ def validate(paths: list[Path]) -> int:
     for p in paths:
         try:
             suite = load_suite(p)
-            errs = validate_suite(suite)
-            if not errs and not Path(suite["path"]).is_dir():
-                errs = [f"agent path does not exist: {suite['path']}"]
-        except Exception as e:  # unreadable file, bad YAML
-            errs = [f"{type(e).__name__}: {e}"]
+        except SuiteError as e:
+            bad += 1
+            print(f"error: {e}", file=sys.stderr)
+            continue
+        errs = validate_suite(suite)
+        if not errs and not Path(suite["path"]).is_dir():
+            errs = [f"agent path does not exist: {suite['path']}"]
         if errs:
             bad += 1
             print(f"FAIL  {p}\n  " + "\n  ".join(errs))
