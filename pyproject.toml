@@ -1,0 +1,59 @@
+[project]
+name = "agent-evals"
+version = "0.2.0"
+description = "Eval harness for Claude Code agents: golden tasks, rule checks, LLM-judge rubrics, traces, cost/latency, regression gate."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Working Model Inc"}]
+keywords = ["claude", "claude-code", "agents", "evals", "testing", "llm", "regression"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = ["pyyaml>=6.0"]
+
+[project.urls]
+Homepage = "https://www.workingmodel.co/"
+Repository = "https://github.com/workingmodel/agent-evals"
+Issues = "https://github.com/workingmodel/agent-evals/issues"
+Changelog = "https://github.com/workingmodel/agent-evals/blob/main/CHANGELOG.md"
+
+[project.scripts]
+agent-evals = "agent_evals.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6", "pyright>=1.1.380"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_evals"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# E501: no formatter is enforced and the code has long literal/format lines (tests especially); line-length
+# above still documents the target, but wrapping existing lines would be pure churn.
+ignore = ["E501"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"

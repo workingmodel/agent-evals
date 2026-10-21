@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# run outputs contain traces of private agent files (handoffs, memory) — never commit
+runs/
+dist/
