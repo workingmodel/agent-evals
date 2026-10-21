@@ -3,19 +3,37 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
+from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from .checks import CHECK_FIELDS
 
 
+class SuiteError(ValueError):
+    """The suite file can't be read or isn't shaped like a suite. The message is meant for the user."""
+
+
 def load_suite(path: Path) -> dict:
-    suite = yaml.safe_load(path.read_text())
+    try:
+        suite = yaml.safe_load(path.read_text())
+    except FileNotFoundError:
+        raise SuiteError(f"suite file not found: {path}") from None
+    except (OSError, UnicodeDecodeError) as e:
+        raise SuiteError(f"cannot read suite file {path}: {e}") from None
+    except yaml.YAMLError as e:
+        raise SuiteError(f"invalid YAML in {path}: {' '.join(str(e).split())}") from None
     if not isinstance(suite, dict):
-        return suite  # validate_suite reports it
+        raise SuiteError(f"{path}: suite must be a YAML mapping")
+    if suite.get("tasks") is not None and not isinstance(suite["tasks"], list):
+        raise SuiteError(f"{path}: `tasks` must be a list")
+    if suite.get("vars") is not None and not isinstance(suite["vars"], dict):
+        raise SuiteError(f"{path}: `vars` must be a mapping of name to value")
     if isinstance(suite.get("path"), str):
         p = Path(suite["path"]).expanduser()
         # relative agent paths are relative to the suite file, so a suite runs from any CWD
@@ -24,7 +42,7 @@ def load_suite(path: Path) -> dict:
     for task in suite.get("tasks") or []:
         if isinstance(task, dict) and isinstance(task.get("prompt"), str):
             for k, v in (suite.get("vars") or {}).items():
-                task["prompt"] = task["prompt"].replace("{" + k + "}", str(v).rstrip())
+                task["prompt"] = task["prompt"].replace("{" + str(k) + "}", str(v).rstrip())
     return suite
 
 
@@ -39,34 +57,82 @@ def task_checks(suite: dict, task: dict) -> list[dict]:
 
 
 def task_hash(suite: dict, task: dict) -> str:
-    """Short fingerprint of what defines a task's result: prompt, effective checks, rubric, model."""
+    """Short fingerprint of what defines a task's result: prompt, effective checks, rubric, model, and the
+    suite's `copy_block` / `pass_mean` when they apply to this task (so default suites keep their hashes)."""
     checks = [{k: v for k, v in c.items() if k != "billing"} for c in task_checks(suite, task)]  # billing is a run option
     blob = {"prompt": task.get("prompt"), "checks": checks, "rubric": task.get("rubric") or [], "model": task.get("model", suite.get("model"))}
+    if suite.get("copy_block") and any(c.get("scope") == "copy_block" for c in checks):
+        blob["copy_block"] = suite["copy_block"]
+    if task.get("rubric") and suite.get("pass_mean", DEFAULT_PASS_MEAN) != DEFAULT_PASS_MEAN:
+        blob["pass_mean"] = suite["pass_mean"]
     return hashlib.sha256(json.dumps(blob, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
 
 
+DEFAULT_PASS_MEAN = 3.5
 SETTING_SOURCES = {"user", "project", "local"}
 
 
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_str_list(v: Any) -> bool:
+    return isinstance(v, list) and all(isinstance(x, str) for x in v)
+
+
+def _is_text(v: Any) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+def _is_setting_sources(v: Any) -> bool:
+    return isinstance(v, str) and all(x.strip() in SETTING_SOURCES for x in v.split(","))
+
+
+def _is_copy_block(v: Any) -> bool:
+    return isinstance(v, list) and len(v) == 2 and all(_is_text(x) for x in v)
+
+
+def _is_vars(v: Any) -> bool:
+    return isinstance(v, dict) and all(isinstance(k, str) and isinstance(x, (str, int, float, bool)) for k, x in v.items())
+
+
+# key -> (predicate, what is expected). Suite-level keys; the first three can also be set per task.
+_KEY_RULES: dict[str, tuple[Callable[[Any], bool], str]] = {
+    "agent": (_is_text, "a non-empty string"),
+    "path": (_is_text, "a non-empty string"),
+    "model": (_is_text, "a non-empty string"),
+    "judge_model": (_is_text, "a non-empty string"),
+    "max_turns": (lambda v: _is_int(v) and v >= 1, "an integer >= 1"),
+    "timeout_s": (lambda v: _is_int(v) and v >= 1, "an integer >= 1"),
+    "repeat": (lambda v: _is_int(v) and v >= 1, "an integer >= 1"),
+    "pass_mean": (lambda v: _is_num(v) and 1 <= v <= 5, "a number between 1 and 5"),
+    "regression_drop": (lambda v: _is_num(v) and v >= 0, "a number >= 0"),
+    "regression_pass_drop": (lambda v: _is_num(v) and 0 <= v <= 1, "a number between 0 and 1"),
+    "min_pass_rate": (lambda v: _is_num(v) and 0 <= v <= 1, "a number between 0 and 1"),
+    "copy_block": (_is_copy_block, "a list of two non-empty strings [start, end]"),
+    "vars": (_is_vars, "a mapping of string names to string or number values"),
+    "allowed_tools": (_is_str_list, "a list of strings"),
+    "disallowed_tools": (_is_str_list, "a list of strings"),
+    "allow_outside": (_is_str_list, "a list of strings"),
+    "exclude": (_is_str_list, "a list of strings"),
+    "setting_sources": (_is_setting_sources, "a comma-separated string of user, project, local"),
+    "confine_paths": (lambda v: isinstance(v, bool), "true or false"),
+    "check_env": (lambda v: isinstance(v, bool), "true or false"),
+}
+_TASK_KEYS = ("model", "max_turns", "timeout_s")
+
+
+def _key_errors(d: dict, keys: Iterable[str], where: str) -> list[str]:
+    """Type- and range-check the given keys of a suite or task mapping (a key present but null is invalid: the runner would read it as a value)."""
+    return [f"{where}`{k}` must be {_KEY_RULES[k][1]}" for k in keys if k in d and not _KEY_RULES[k][0](d[k])]
+
+
 def _suite_key_errors(suite: dict) -> list[str]:
-    errs = []
-    ss = suite.get("setting_sources")
-    if ss is not None and not (isinstance(ss, str) and all(x.strip() in SETTING_SOURCES for x in ss.split(","))):
-        errs.append("`setting_sources` must be a comma-separated string of user, project, local")
-    for k in ("allow_outside", "exclude"):
-        v = suite.get(k)
-        if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
-            errs.append(f"`{k}` must be a list of strings")
-    for k in ("confine_paths", "check_env"):
-        if k in suite and not isinstance(suite[k], bool):
-            errs.append(f"`{k}` must be true or false")
-    if "repeat" in suite and (not isinstance(suite["repeat"], int) or isinstance(suite["repeat"], bool) or suite["repeat"] < 1):
-        errs.append("`repeat` must be an integer >= 1")
-    for k in ("min_pass_rate", "regression_pass_drop"):
-        v = suite.get(k)
-        if k in suite and (isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1):
-            errs.append(f"`{k}` must be a number between 0 and 1")
-    return errs
+    return _key_errors(suite, _KEY_RULES, "")
 
 
 def _check_errors(check: object, where: str) -> list[str]:
@@ -125,6 +191,9 @@ def validate_suite(suite: dict) -> list[str]:
         seen.add(tid)
         if not t.get("prompt"):
             errs.append(f"{where}: missing prompt")
+        elif not isinstance(t["prompt"], str):
+            errs.append(f"{where}: prompt must be a string")
+        errs += _key_errors(t, _TASK_KEYS, f"{where}: ")
         errs += [e for c in t.get("checks") or [] for e in _check_errors(c, where)]
         errs += [f"{where}: skip_checks refers to unknown suite check `{s}`" for s in t.get("skip_checks") or [] if s not in suite_ids]
         rubric = t.get("rubric")
