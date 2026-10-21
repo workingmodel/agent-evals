@@ -20,7 +20,7 @@ CI runs the same three on Python 3.11, 3.12 and 3.13.
 
 ## Tests never spend tokens
 
-The test suite must not call `claude`. Tests mock it, usually by patching `subprocess.run` or `cli.run_task`. See `tests/test_sprint4.py` for a fake `claude` that emits stream-json. A test that would spend tokens is a bug.
+The test suite must not call `claude`. Tests mock it, usually by patching `subprocess.run` or `cli.run_task`. See `tests/fakes.py` for a fake `claude` that emits stream-json. A fixture in `tests/conftest.py` fails any test that reaches the real `claude` binary. A test that would spend tokens is a bug.
 
 Live runs against the example suite are optional and manual. If you do one, say so in the pull request.
 
