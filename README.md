@@ -4,7 +4,7 @@ Unit tests for Claude Code agents. Run an agent headless on golden tasks, check 
 
 ## Why we built this
 
-[Working Model](https://www.workingmodel.co/) is a studio that runs its own fleet of Claude Code agents. They do copywriting, art direction, research, legal review and devops.
+[Working Model](https://www.workingmodel.co/) is a studio that runs its own fleet of Claude Code agents.
 
 Every agent is defined by a `CLAUDE.md`, a set of rules and a model. When we change any of those, we need to know what broke. Reading a few outputs by hand doesn't scale, and it misses the quiet regressions. So we wrote tests for agents: the same idea as unit tests, applied to prompts and rules. We use agent-evals to catch regressions when we change an agent's `CLAUDE.md`, rules or model.
 
