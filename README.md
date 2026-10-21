@@ -33,11 +33,13 @@ The harness enforces no minimum Claude Code version. `doctor` prints the version
 Pick one:
 
 ```bash
-pipx install agent-evals          # isolated, on your PATH
-uv tool install agent-evals       # same, with uv
-uvx agent-evals doctor            # run once without installing
-pip install agent-evals           # into the current environment
+pipx install wm-agent-evals                  # isolated, on your PATH
+uv tool install wm-agent-evals               # same, with uv
+uvx --from wm-agent-evals agent-evals doctor # run once without installing
+pip install wm-agent-evals                   # into the current environment
 ```
+
+The package on PyPI is `wm-agent-evals` (the plain name was too close to an existing project). The command it installs is `agent-evals`, and the Python import is `agent_evals`.
 
 Then check your setup. It costs no tokens:
 

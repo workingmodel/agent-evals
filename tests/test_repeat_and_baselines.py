@@ -450,4 +450,4 @@ def test_version_flag_and_dunder(capsys):
         cli.main(["--version"])
     assert e.value.code == 0
     assert capsys.readouterr().out.strip() == f"agent-evals {agent_evals.__version__}"
-    assert agent_evals.__version__ == version("agent-evals")
+    assert agent_evals.__version__ == version("wm-agent-evals")

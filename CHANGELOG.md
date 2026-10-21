@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.2] - 2026-10-21
+
+### Changed
+
+- The PyPI package is named `wm-agent-evals`. PyPI rejected `agent-evals` as too similar to an existing project. The command (`agent-evals`), the import (`agent_evals`) and everything else are unchanged. 0.2.1 was never published to PyPI; this is the first PyPI release.
+
 ## [0.2.1] - 2026-10-21
 
 Hardening after the first public release.
