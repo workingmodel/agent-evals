@@ -256,3 +256,32 @@ def test_symlink_is_copied_as_link_and_access_through_it_is_flagged(monkeypatch,
     assert not run_check({"id": "c", "type": "paths_confined"}, rr.artifacts, None).passed
     snap = json.loads((tmp_path / "run" / "workspaces" / "t.snapshot.json").read_text())
     assert "notes.md" not in snap["files"] and "alias.md" not in snap["files"] and "inside.md" in snap["files"]
+
+
+def test_parse_trace_scratch_dir_is_not_outside(tmp_path):
+    scratch = tmp_path / "agent-evals-abc"
+    ws = scratch / "agent"
+    ws.mkdir(parents=True)
+    events = [tu("Read", file_path=str(scratch / "craft-memory" / "x.md")),  # typo: dropped the agent/ segment
+              tu("Glob", path=str(scratch)),
+              tu("Read", file_path=str(tmp_path / "agent-evals-other" / "x.md")),  # a sibling temp dir is outside
+              tu("Read", file_path="../../etc/passwd")]
+    real = os.path.realpath
+    _, _, out = runner.parse_trace(events, ws, scratch=real(scratch))
+    assert out == [f"Read:{real(tmp_path / 'agent-evals-other' / 'x.md')}", f"Read:{real(tmp_path / 'etc' / 'passwd')}"]
+    assert len(runner.parse_trace(events, ws)[2]) == 4  # without scratch, all four are flagged
+
+
+def test_rescore_tolerates_typo_into_old_scratch_dir(tmp_path):
+    old_scratch = os.path.realpath(tmp_path) + "/gone/agent-evals-xyz"  # the run's temp dir, removed after the run
+    rd = tmp_path / "runs" / "r"
+    ws = rd / "workspaces" / "t" / "agent"
+    ws.mkdir(parents=True)
+    (ws / "status.md").write_text("s")
+    (rd / "workspaces" / "t.snapshot.json").write_text(json.dumps({"workspace": old_scratch + "/agent", "files": {"status.md": "x"}}))
+    (rd / "traces").mkdir()
+    events = [tu("Read", file_path=old_scratch + "/agent/status.md"), tu("Read", file_path=old_scratch + "/craft-memory/x.md"),
+              tu("Read", file_path="/etc/hosts")]
+    (rd / "traces" / "t.jsonl").write_text("\n".join(json.dumps(e) for e in events))
+    art = runner.artifacts_from_saved(rd, "t", tmp_path / "agent")
+    assert art.outside == [f"Read:{os.path.realpath('/etc/hosts')}"]

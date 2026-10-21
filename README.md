@@ -176,7 +176,7 @@ It's a heuristic, line by line. A line that contains the canary fails unless the
 
 Two checks are added to every task automatically:
 
-- `paths-confined` (a `paths_confined` check): fails if a file tool (Read, Write, Edit, Glob, Grep, NotebookEdit) targeted a path outside the workspace. Reads count. Turn off with `confine_paths: false` or `skip_checks: [paths-confined]`. Tolerate specific prefixes with `allow_outside`.
+- `paths-confined` (a `paths_confined` check): fails if a file tool (Read, Write, Edit, Glob, Grep, NotebookEdit) targeted a path outside the workspace. Reads count. Paths inside the run's own temp dir are not flagged: that dir holds only the workspace copy, and agents sometimes mistype the long temp path (for example, dropping the agent-folder segment), which reads nothing. Turn off with `confine_paths: false` or `skip_checks: [paths-confined]`. Tolerate specific prefixes with `allow_outside`.
 - `clean-env` (a `clean_env` check): reads the environment Claude Code reports in its init event (version, model, `apiKeySource`, MCP servers, non-builtin plugins, memory paths, cwd). It fails if a plugin or MCP server loaded, or if a subscription-billed run saw an API key. A trace with no init event passes. Turn off with `check_env: false` or `skip_checks: [clean-env]`.
 
 ## What "pass" means

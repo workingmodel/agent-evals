@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.3] - Unreleased
+
+### Fixed
+
+- `paths-confined` no longer flags paths inside the run's own temp dir. That dir holds only the workspace copy, so a path in it reaches nothing. Agents sometimes mistype the long temp path, for example by dropping the agent-folder segment, which made the check fail runs where nothing left the workspace. `rescore` applies the same rule, using the temp dir recorded in the run's snapshot. Paths outside that dir, including sibling temp dirs, are still flagged.
+
 ## [0.2.2] - 2026-10-21
 
 ### Changed

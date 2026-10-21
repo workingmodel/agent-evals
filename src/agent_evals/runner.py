@@ -111,10 +111,14 @@ def _snapshot(root: Path) -> dict[str, str]:
     return out
 
 
-def parse_trace(events: list[dict], ws: Path) -> tuple[list[str], list[str], list[str]]:
+def parse_trace(events: list[dict], ws: Path, scratch: str | None = None) -> tuple[list[str], list[str], list[str]]:
     """(reads, tool names, outside) from stream-json events. `outside` is "<Tool>:<path>" for every
-    file tool whose target resolves outside the workspace root (the agent-folder copy the run starts in)."""
+    file tool whose target resolves outside the workspace root (the agent-folder copy the run starts in).
+    `scratch` is the harness's own temp dir that holds the workspace and nothing else: a path inside it
+    (an agent mistyping the long temp path, say dropping the agent-folder segment) can't reach anything,
+    so it isn't flagged."""
     root = os.path.realpath(ws)
+    inside = [root] + ([scratch] if scratch else [])
     reads, names, outside = [], [], []
     for e in events:
         if e.get("type") != "assistant":
@@ -133,7 +137,7 @@ def parse_trace(events: list[dict], ws: Path) -> tuple[list[str], list[str], lis
                 if not target:
                     continue
                 real = os.path.realpath(os.path.join(ws, os.path.expanduser(target)))
-                if real != root and not real.startswith(root + os.sep):
+                if not any(real == r or real.startswith(r + os.sep) for r in inside):
                     outside.append(f"{name}:{real}")
     return reads, names, outside
 
@@ -201,7 +205,7 @@ def _run_in(tmp: Path, agent_dir: Path, task: dict, name: str, cfg: dict, run_di
     trace_path.parent.mkdir(parents=True, exist_ok=True)
     trace_path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
 
-    reads, tool_names, outside = parse_trace(events, ws)
+    reads, tool_names, outside = parse_trace(events, ws, scratch=str(tmp))
 
     after = _snapshot(ws)
     changed = {p for p, h in after.items() if before.get(p) != h}
@@ -261,7 +265,9 @@ def artifacts_from_saved(run_dir: Path, task_id: str, agent_dir: Path) -> Artifa
     snap = json.loads(snap_path.read_text()) if snap_path.exists() else None
     if snap and snap.get("workspace") and snap["workspace"] != os.path.realpath(ws):
         events = _rebase(events, snap["workspace"], os.path.realpath(ws))
-    reads, tools, outside = parse_trace(events, ws)
+    # the run's temp dir (the snapshot's workspace parent) held only the workspace; paths left in it after the
+    # rebase are agent typos into that dir, not reads outside
+    reads, tools, outside = parse_trace(events, ws, scratch=os.path.dirname(snap["workspace"]) if snap and snap.get("workspace") else None)
     files, deleted = {}, []
     if snap:
         now = _snapshot(ws)
