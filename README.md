@@ -398,7 +398,7 @@ See [History](#history). Both take `--runs-dir DIR` (default `./runs`); `show` a
 
 ### `weekly`
 
-See [Weekly before/after](#weeklybeforeafter). Options: `--runs-dir`, `--agent`, `--week`, `--vs`, `--out`, `--by-version`, `--cost-threshold`, `--latency-threshold`, `--judge-drop`. Zero tokens.
+See [Weekly before/after](#weekly-beforeafter). Options: `--runs-dir`, `--agent`, `--week`, `--vs`, `--out`, `--by-version`, `--cost-threshold`, `--latency-threshold`, `--judge-drop`. Zero tokens.
 
 ### `doctor`
 
