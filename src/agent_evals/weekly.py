@@ -10,7 +10,7 @@ a repeated row contributes its mean once.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from .telemetry import percentile
 
@@ -72,6 +72,11 @@ def _num(v) -> float | None:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
+def _sub(r: dict, key: str) -> dict:
+    v = r.get(key)
+    return v if isinstance(v, dict) else {}
+
+
 def _n(r: dict) -> int:
     n = r.get("n")
     return n if isinstance(n, int) and not isinstance(n, bool) and n >= 1 else 1
@@ -83,13 +88,13 @@ def _rate(r: dict) -> float:
 
 
 def _tokens_in(r: dict) -> float | None:
-    t = r.get("tokens") if isinstance(r.get("tokens"), dict) else {}
+    t = _sub(r, "tokens")
     parts = [_num(t.get(k)) for k in ("input", "cache_read", "cache_creation")]
     return sum(p for p in parts if p is not None) if any(p is not None for p in parts) else None
 
 
 def _tokens_out(r: dict) -> float | None:
-    return _num((r.get("tokens") if isinstance(r.get("tokens"), dict) else {}).get("output"))
+    return _num(_sub(r, "tokens").get("output"))
 
 
 def _cost(r: dict, which: str = "total") -> float | None:
@@ -108,7 +113,7 @@ def _per_sample(rows: list[dict], getter) -> float | None:
 
 
 def _lat(r: dict, key: str) -> float | None:
-    return _num((r.get("latency") if isinstance(r.get("latency"), dict) else {}).get(key))
+    return _num(_sub(r, "latency").get(key))
 
 
 def stats(rows: list[dict]) -> dict:
@@ -192,8 +197,8 @@ def _ts(r: dict) -> datetime:
     try:
         t = datetime.fromisoformat(r["timestamp"])
     except (KeyError, TypeError, ValueError):
-        return datetime.min.replace(tzinfo=timezone.utc)
-    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+        return datetime.min.replace(tzinfo=UTC)
+    return t if t.tzinfo else t.replace(tzinfo=UTC)
 
 
 def _fp(r: dict) -> str:
@@ -343,6 +348,10 @@ def _rows_md(metrics: dict, keys=None) -> list[str]:
     return lines
 
 
+def _cell(ms: dict, k: str) -> str:
+    return f"{fmt(k, ms[k]['before'])} → {fmt(k, ms[k]['after'])}"
+
+
 def flags_of(data: dict) -> list[tuple[str, str, str, str, dict]]:
     """(flag, agent, task or "", key, metric) for every flagged metric, agent level first."""
     out = []
@@ -372,10 +381,9 @@ def render(data: dict) -> str:
     lines += ["## Summary", "", "| Agent | Pass rate | Judge | Resistance | Cost / sample | Wall p50 | Spend | Flags |", "|---|---|---|---|---|---|---|---|"]
     for name, rep in data["agents"].items():
         ms = rep["metrics"]
-        cell = lambda k: f"{fmt(k, ms[k]['before'])} → {fmt(k, ms[k]['after'])}"  # noqa: E731
         w = sum(1 for f in flags_of(data) if f[1] == name and f[0] == "warn")
-        lines.append(f"| {name} | {cell('pass_rate')} | {cell('judge_mean')} | {cell('resistance')} | {cell('cost_ps')} "
-                     f"| {cell('wall_p50')} | {cell('total_cost')} | {w} ⚠️ |")
+        lines.append(f"| {name} | {_cell(ms, 'pass_rate')} | {_cell(ms, 'judge_mean')} | {_cell(ms, 'resistance')} | {_cell(ms, 'cost_ps')} "
+                     f"| {_cell(ms, 'wall_p50')} | {_cell(ms, 'total_cost')} | {w} ⚠️ |")
     fl = flags_of(data)
     lines += ["", "## Flagged", ""] + ([_flag_line(f) for f in fl if f[0] == "warn"] or ["Nothing flagged."])
     good = [_flag_line(f) for f in fl if f[0] == "good"]

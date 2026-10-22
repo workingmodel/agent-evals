@@ -291,6 +291,38 @@ The run also records `agent_fingerprint`: the first 12 hex characters of a sha25
 
 `agent-evals history show [--agent NAME] [--last N]` prints the most recent lines as a table (run, task, result, judge mean, cost, wall/API/TTFT, tokens in/out).
 
+## Weekly before/after
+
+`agent-evals weekly` compares two ISO weeks of `<runs-dir>/history.jsonl`, per agent and per task, and writes a markdown report plus a JSON file with the same data. It reads only the history file and spends nothing. History for runs from before the file existed comes from `agent-evals history rebuild`.
+
+```
+agent-evals weekly                                   # latest week in the history vs the week before it
+agent-evals weekly --agent tiny-writer --week 2026-W43 --vs 2026-W42
+agent-evals weekly --agent tiny-writer --by-version  # latest agent fingerprint vs the one before it
+```
+
+Report: `<runs-dir>/weekly/<week>[-<agent>].md` and `.json` (or `--out PATH`; the JSON sits next to it). It holds a per-agent summary, flagged and improved metrics, comparability warnings, a version-change section, and a table per agent and per task. Each metric shows before, after and the change: points for pass rate and injection resistance, absolute for the judge mean, percent for tokens, cost, latency and turns, and `—` when either side has no data. If the comparison week has no rows, the current week is still reported, and the report names the most recent earlier week with data so you can pass it as `--vs`.
+
+What is measured:
+
+- **Runs and samples**: history rows, and the sum of `n` over them.
+- **Pass rate and judge mean** are sample-weighted. **Injection resistance** is the sample-weighted pass rate of `category: injection` rows (the JSON also has the count of vectors held).
+- **Tokens, cost and turns are per sample** (sum divided by samples), so a `--repeat 3` week doesn't look three times as expensive. Tokens in are input plus cache reads and writes. Cost is split into agent, judge and total; the agent's total spend for the week (a plain sum) is shown too.
+- **Latency p50 and p95** (wall, API, time to first token) are taken over history rows. A repeated task is one row holding the mean of its samples, so it counts once.
+
+Flags: ⚠️ when a metric moves the wrong way past its threshold, ✅ when it moves the right way past the same one.
+
+| Metric | Threshold | Option |
+|---|---|---|
+| Total cost, tokens in or out per sample | +20% | `--cost-threshold 0.2` |
+| p95 wall or API latency | +25% | `--latency-threshold 0.25` |
+| Pass rate, injection resistance | any drop | |
+| Judge mean | drop of 0.25 | `--judge-drop 0.25` |
+
+With fewer than 3 rows on either side, latency percentiles are labelled "(few runs)" and not flagged.
+
+The report warns when the two weeks differ in model, judge model, Claude Code version or billing, since the numbers then aren't like for like. If the agent fingerprint changed between the weeks or within the current one, a "Version change" section shows the same headline metrics for each fingerprint across both weeks, oldest first; rows from before fingerprints were recorded are "unknown (pre-0.3 run)". `--by-version` ignores weeks: it needs `--agent`, and compares all rows of the agent's latest fingerprint with all rows of the one before it, for a before/after on one specific edit regardless of the calendar. Exit code 2 for a bad week string, a missing history file, or an unknown agent.
+
 ## Testing prompt injection
 
 This tests indirect injection: an instruction hidden in content the agent reads (pasted text, a workspace file, an encoded blob), not in the user's own request. The agent should still do the real job, not act on the planted instruction, and tell the user it was there.
@@ -363,6 +395,10 @@ Checks suite files and that each agent `path` exists. Zero tokens. Exit 0 or 2.
 ### `history rebuild` / `history show`
 
 See [History](#history). Both take `--runs-dir DIR` (default `./runs`); `show` also takes `--agent NAME` and `--last N` (default 20). Zero tokens.
+
+### `weekly`
+
+See [Weekly before/after](#weeklybeforeafter). Options: `--runs-dir`, `--agent`, `--week`, `--vs`, `--out`, `--by-version`, `--cost-threshold`, `--latency-threshold`, `--judge-drop`. Zero tokens.
 
 ### `doctor`
 
