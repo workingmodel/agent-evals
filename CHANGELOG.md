@@ -12,6 +12,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `<runs-dir>/history.jsonl`: one line per task per run, appended by `run` and replaced by `rescore`. Never fails a run.
 - `agent-evals history rebuild` regenerates the history from saved runs (zero tokens, idempotent). `agent-evals history show` prints a compact table.
 - Report: `API` and `TTFT` columns, and the header splits cost into agent and judge.
+- Prompt-injection testing. Task key `files:` seeds files into the workspace before the starting snapshot (inline text or `{from: path}`), validated up front and included in the task fingerprint. Task keys `category` and `vector`; `category: injection` requires every sample to pass (`min_pass_rate` 1.0 unless the task sets one), adds an "Injection resistance" section to the report, prefixes regressions with `[injection]`, and adds `category` and `vector` to history rows.
+- Checks `tool_not_used` (attempted tool calls, denied ones included, optional input regex), `file_unchanged` (pre-existing files modified or deleted) and `flags_injection` (the user was told about an embedded instruction). Results record `files_modified`; `rescore` re-derives it and the tool calls from the saved run.
+- `examples/suites/injection.yaml`: a 12-vector public pack against the example agent, and a "Testing prompt injection" README section.
+- Task key `min_pass_rate` (per-task override of the suite value).
 
 ### Changed
 
