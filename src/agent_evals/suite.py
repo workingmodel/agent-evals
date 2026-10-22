@@ -119,6 +119,7 @@ _KEY_RULES: dict[str, tuple[Callable[[Any], bool], str]] = {
     "disallowed_tools": (_is_str_list, "a list of strings"),
     "allow_outside": (_is_str_list, "a list of strings"),
     "exclude": (_is_str_list, "a list of strings"),
+    "fingerprint": (_is_str_list, "a list of glob strings"),
     "setting_sources": (_is_setting_sources, "a comma-separated string of user, project, local"),
     "confine_paths": (lambda v: isinstance(v, bool), "true or false"),
     "check_env": (lambda v: isinstance(v, bool), "true or false"),
