@@ -6,10 +6,13 @@
     agent-evals run examples/suites/tiny-writer.yaml --update-baseline
     agent-evals run examples/suites/tiny-writer.yaml --repeat 3          # each task 3 times; pass rate + stdev
     agent-evals rescore runs/<run>      # re-apply rule checks, zero tokens
+    agent-evals history rebuild         # regenerate runs/history.jsonl from saved runs, zero tokens
+    agent-evals history show --last 10  # recent runs, one line per task
     agent-evals validate suites/*.yaml  # check suites, zero tokens
     agent-evals doctor                  # check the claude CLI, zero tokens
 
-Outputs <runs-dir>/<timestamp>-<agent>-<id>/{results.json, report.md, traces/, workspaces/} (default ./runs).
+Outputs <runs-dir>/<timestamp>-<agent>-<id>/{results.json, report.md, traces/, workspaces/} (default ./runs),
+and one line per task per run in <runs-dir>/history.jsonl.
 Baselines live in <baselines-dir>/<agent>.json (default ./baselines; commit them).
 """
 from __future__ import annotations
@@ -26,11 +29,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__
+from . import __version__, history, telemetry
 from .checks import run_checks
 from .judge import judge
 from .report import compare, render
-from .runner import run_task
+from .runner import agent_fingerprint, run_task
 from .suite import SuiteError, load_suite, task_checks, task_hash, validate_suite
 
 FLAGS = ("--json-schema", "--setting-sources", "--strict-mcp-config", "--tools", "--no-session-persistence",
@@ -135,6 +138,7 @@ def _aggregate(samples: list[dict], min_pass_rate: float) -> dict:
                   "stdev": round(statistics.pstdev(means), 2) if means else None,
                   "tokens": sum(x["judge"].get("tokens", 0) for x in samples),
                   "cost_usd": round(sum(x["judge"].get("cost_usd", 0) for x in samples), 4)},
+        **telemetry.aggregate(samples),
         "cost_usd": round(sum(x["cost_usd"] for x in samples), 4),
         "tokens": {k: sum(x["tokens"].get(k, 0) for x in samples) for k in sorted(tok_keys)},
         "judge_tokens": sum(x.get("judge_tokens", 0) for x in samples),
@@ -155,6 +159,7 @@ def _error_result(t: dict, error: str) -> dict:
         "checks": [], "checks_passed": 0, "checks_total": 0,
         "judge": {"scores": [], "mean": None, "tokens": 0, "cost_usd": 0.0},
         "cost_usd": 0.0, "tokens": {}, "judge_tokens": 0, "duration_s": 0.0, "turns": 0,
+        **telemetry.from_result({}, None), "agent_cost_usd": 0.0, "judge_cost_usd": 0.0,
         "tools": [], "reads": [], "outside_paths": [], "files_written": [], "files_deleted": [], "final_excerpt": "", "env": {},
     }
 
@@ -182,6 +187,14 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("validate", help="validate suite files (zero tokens)")
     v.add_argument("suites", nargs="+", type=Path)
     sub.add_parser("doctor", help="check the claude CLI and billing setup (zero tokens)")
+    h = sub.add_parser("history", help="the run history file (zero tokens)")
+    hs = h.add_subparsers(dest="history_cmd", required=True)
+    hb = hs.add_parser("rebuild", help="regenerate history.jsonl from every saved results.json")
+    hw = hs.add_parser("show", help="print recent history as a table")
+    hw.add_argument("--agent")
+    hw.add_argument("--last", type=int, default=20, metavar="N")
+    for hp in (hb, hw):
+        hp.add_argument("--runs-dir", type=Path, default=Path("runs"))
     args = ap.parse_args(argv)
     if args.cmd == "rescore":
         return rescore(args.run_dir, args.update_baseline, args.suite, args.baselines_dir)
@@ -189,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
         return validate(args.suites)
     if args.cmd == "doctor":
         return doctor()
+    if args.cmd == "history":
+        return history_cmd(args)
 
     try:
         suite = load_suite(args.suite)
@@ -233,6 +248,11 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = run_dir.resolve()
     block = tuple(suite["copy_block"]) if suite.get("copy_block") else None
     pass_mean = suite.get("pass_mean", 3.5)
+    try:  # from the agent folder as it is now, before any task runs
+        fingerprint = agent_fingerprint(Path(suite["path"]), suite.get("fingerprint"), suite.get("exclude"))
+    except OSError as e:
+        fingerprint = None
+        print(f"warning: could not fingerprint the agent: {e}", file=sys.stderr)
     n = args.repeat if args.repeat is not None else suite.get("repeat", 1)
     if n > 5:
         judged = 0 if args.no_judge else sum(bool(t.get("rubric")) for t in tasks)
@@ -256,7 +276,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"{res['duration_s']}s  {res['turns']} turns  ${res['cost_usd']}"
                   + (f"  {res['error']}" if res["error"] else ""), flush=True)
     finally:  # also on Ctrl-C: keep what we have
-        summary = {"agent": agent, "suite": str(args.suite.resolve()), "billing": args.billing, "run": run_dir.name, "results": results, "regressions": regressions}
+        summary = {"agent": agent, "suite": str(args.suite.resolve()), "billing": args.billing, "run": run_dir.name,
+                   "agent_fingerprint": fingerprint, "results": results, "regressions": regressions}
         if n > 1:
             summary["repeat"] = n
         try:  # the results are already paid for: a comparison failure must never stop them being written
@@ -267,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"warning: could not compare with the baseline: {compare_error}", file=sys.stderr)
         (run_dir / "results.json").write_text(json.dumps(summary, indent=2))
         (run_dir / "report.md").write_text(render(summary, suite))
+        _update_history(run_dir.parent, summary, run_dir)
         print(f"\nreport: {run_dir / 'report.md'}")
 
     if args.update_baseline:
@@ -280,6 +302,30 @@ def main(argv: list[str] | None = None) -> int:
     if compare_error and args.gate:
         print("error: --gate could not compare with the baseline", file=sys.stderr)
         return 2
+    return 0
+
+
+def _update_history(runs_dir: Path, summary: dict, run_dir: Path, only_if_exists: bool = False) -> None:
+    """Replace this run's lines in history.jsonl. Derived data, so a failure only warns."""
+    if only_if_exists and not (runs_dir / history.NAME).exists():
+        return
+    try:
+        history.update(runs_dir, summary, run_dir)
+    except Exception as e:
+        print(f"warning: could not update {history.NAME}: {type(e).__name__}: {e}", file=sys.stderr)
+
+
+def history_cmd(args) -> int:
+    if not args.runs_dir.is_dir():
+        print(f"error: runs dir not found: {args.runs_dir}", file=sys.stderr)
+        return 2
+    if args.history_cmd == "show":
+        print(history.show(history.load(args.runs_dir), args.agent, args.last), end="")
+        return 0
+    runs, rows, warnings = history.rebuild(args.runs_dir)
+    for w in warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    print(f"{args.runs_dir / history.NAME}: {rows} rows from {runs} runs")
     return 0
 
 
@@ -326,13 +372,16 @@ def _run_one(t: dict, suite: dict, run_dir: Path, block, pass_mean: float, no_ju
         passed, reason = False, ""
     res = {
         "task": t["id"], "title": t.get("title", t["id"]),
+        "model": t.get("model", suite.get("model")), "judge_model": suite.get("judge_model", "claude-haiku-5-5") if t.get("rubric") else None,
         "run_ok": rr.ok, "error": rr.error,
         "passed": passed,
         "checks": [c.__dict__ for c in checks],
         "checks_passed": sum(c.passed for c in checks), "checks_total": len(checks),
         "judge": verdict,
         "cost_usd": round(rr.cost_usd + verdict.get("cost_usd", 0), 4),
+        "agent_cost_usd": round(rr.cost_usd, 4), "judge_cost_usd": round(verdict.get("cost_usd", 0), 4),
         "tokens": rr.tokens, "judge_tokens": verdict.get("tokens", 0),
+        **(rr.metrics or telemetry.from_result({}, rr.duration_s)),
         "duration_s": rr.duration_s, "turns": rr.num_turns,
         "tools": rr.artifacts.tools, "reads": rr.artifacts.reads, "outside_paths": rr.artifacts.outside,
         "files_written": list(rr.artifacts.files), "files_deleted": rr.artifacts.deleted,
@@ -392,6 +441,7 @@ def rescore(run_dir: Path, update_baseline: bool, suite_path: Path | None = None
     _warn_mismatch(summary, baseline, suite)
     (run_dir / "results.json").write_text(json.dumps(summary, indent=2))
     (run_dir / "report.md").write_text(render(summary, suite))
+    _update_history(run_dir.resolve().parent, summary, run_dir.resolve(), only_if_exists=True)
     if summary["regressions"]:
         print("REGRESSIONS:\n  " + "\n  ".join(summary["regressions"]))
     if update_baseline:
@@ -410,6 +460,7 @@ def _rescore_sample(r: dict, name: str, t: dict, suite: dict, run_dir: Path, blo
     r["outside_paths"] = art.outside
     r["files_deleted"] = art.deleted
     r["env"] = art.env
+    telemetry.fill_sample(r, run_dir / "traces" / f"{name}.jsonl", refresh=True)
     r["checks_passed"], r["checks_total"] = sum(c.passed for c in checks), len(checks)
     m = r["judge"]["mean"]
     # stored runs don't record --no-judge; judge output (scores or error) means it was judged
