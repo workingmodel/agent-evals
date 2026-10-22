@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from agent_evals import cli, runner
+from fakes import run_dirs
 from test_cli import mk_suite, ok_run, res, write_suite
 from test_runner import fake_agent, stream
 
@@ -12,7 +13,7 @@ def test_runs_and_baselines_dir_options(env, monkeypatch):
     monkeypatch.setattr(cli, "run_task", lambda agent_dir, t, *a: ok_run(t["id"]))
     sp = write_suite(env, mk_suite())
     assert cli.main(["run", str(sp), "--task", "t2", "--runs-dir", str(env / "R"), "--baselines-dir", str(env / "B"), "--update-baseline"]) == 0
-    assert (env / "B" / "a.json").exists() and len(list((env / "R").iterdir())) == 1
+    assert (env / "B" / "a.json").exists() and len(list(run_dirs(env / "R"))) == 1
     assert not (env / "runs").exists() and not (env / "baselines").exists()
 
 
@@ -20,7 +21,7 @@ def test_absolute_suite_path_and_billing_stored(env, monkeypatch):
     monkeypatch.setattr(cli, "run_task", lambda agent_dir, t, *a: ok_run(t["id"]))
     write_suite(env, mk_suite())
     cli.main(["run", "suite.yaml", "--task", "t2"])  # relative argument
-    (d,) = (env / "runs").iterdir()
+    (d,) = run_dirs(env / "runs")
     summary = json.loads((d / "results.json").read_text())
     assert Path(summary["suite"]).is_absolute() and summary["suite"].endswith("suite.yaml")
     assert summary["billing"] == "subscription"
@@ -71,7 +72,7 @@ def test_billing_api_report_and_judge_env(env, monkeypatch):
     monkeypatch.setattr(cli, "judge", jd)
     sp = write_suite(env, mk_suite())
     assert cli.main(["run", str(sp), "--task", "t1", "--billing", "api"]) == 0
-    (d,) = (env / "runs").iterdir()
+    (d,) = run_dirs(env / "runs")
     assert seen["cfg"]["billing"] == "api" and seen["jb"] == "api"
     assert json.loads((d / "results.json").read_text())["billing"] == "api"
     rep = (d / "report.md").read_text()
@@ -81,7 +82,7 @@ def test_billing_api_report_and_judge_env(env, monkeypatch):
 def test_default_report_wording_and_old_run_billing(env, monkeypatch):
     monkeypatch.setattr(cli, "run_task", lambda agent_dir, t, *a: ok_run(t["id"]))
     cli.main(["run", str(write_suite(env, mk_suite())), "--task", "t2"])
-    (d,) = (env / "runs").iterdir()
+    (d,) = run_dirs(env / "runs")
     assert "notional (billed to subscription, not API)" in (d / "report.md").read_text()
     # old results.json has no `billing` key
     old = {"agent": "a", "run": "r", "regressions": [], "results": [res("t")]}

@@ -13,7 +13,7 @@ from agent_evals import cli, runner
 from agent_evals.checks import Artifacts, run_check
 from agent_evals.runner import RunResult
 from agent_evals.suite import validate_suite
-from fakes import FakeClaude, inj_suite, only_run, results_of
+from fakes import FakeClaude, inj_suite, only_run, results_of, run_dirs
 from test_cli import mk_suite, res, write_suite
 from test_runner import fake_agent, stream, tu
 
@@ -132,7 +132,7 @@ def test_deleted_survives_file_pattern_filter():
 def test_files_deleted_in_results_and_rescore(env, monkeypatch):
     monkeypatch.setattr(cli, "run_task", lambda agent_dir, t, *a: RunResult(t["id"], True, Artifacts(final="ok", deleted=["a.md"])))
     cli.main(["run", str(write_suite(env, mk_suite())), "--task", "t2"])
-    (d,) = (env / "runs").iterdir()
+    (d,) = run_dirs(env / "runs")
     r = json.loads((d / "results.json").read_text())["results"][0]
     assert r["files_deleted"] == ["a.md"]
     assert "deleted a.md" in (d / "report.md").read_text()

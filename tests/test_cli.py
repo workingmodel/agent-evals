@@ -11,6 +11,7 @@ from agent_evals.judge import judge
 from agent_evals.report import compare, render
 from agent_evals.runner import RunResult
 from agent_evals.suite import load_suite, validate_suite
+from fakes import run_dirs
 
 SUITES = sorted((Path(__file__).parent.parent / "examples" / "suites").glob("*.yaml"))
 
@@ -92,7 +93,7 @@ def run_main(env, suite, *extra):
 
 
 def load_results(env):
-    (d,) = (env / "runs").iterdir()
+    (d,) = run_dirs(env / "runs")
     return json.loads((d / "results.json").read_text()), d
 
 

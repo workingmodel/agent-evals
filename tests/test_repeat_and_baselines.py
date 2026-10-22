@@ -10,7 +10,7 @@ from agent_evals import cli, runner
 from agent_evals.checks import Artifacts
 from agent_evals.report import compare, render
 from agent_evals.suite import load_suite, task_hash
-from fakes import FakeClaude, inj_suite, only_run, results_of
+from fakes import FakeClaude, inj_suite, only_run, results_of, run_dirs
 from test_cli import mk_suite, ok_run, res, write_suite
 
 
@@ -367,7 +367,7 @@ def test_update_baseline_creates_nested_baselines_dir(env, monkeypatch):
     assert cli.main(["run", str(sp), "--update-baseline", "--baselines-dir", str(deep)]) == 0
     assert (deep / "a.json").exists()
     monkeypatch.setattr("agent_evals.runner.artifacts_from_saved", lambda *a: Artifacts(final="fine"))
-    rd = next((env / "runs").iterdir())
+    rd = run_dirs(env / "runs")[0]
     deeper = env / "x" / "y" / "z"
     assert cli.main(["rescore", str(rd), "--suite", str(sp), "--update-baseline", "--baselines-dir", str(deeper)]) == 0
     assert (deeper / "a.json").exists()
@@ -388,7 +388,7 @@ def test_results_and_report_written_even_if_compare_raises(env, monkeypatch, cap
     (env / "baselines").mkdir()
     (env / "baselines" / "a.json").write_text("{}")
     assert cli.main(["run", str(sp), "--gate"]) == 2  # a gate that couldn't compare must not pass
-    assert len(list((env / "runs").iterdir())) == 2
+    assert len(list(run_dirs(env / "runs"))) == 2
 
 
 def test_results_written_even_if_mismatch_warning_raises(env, monkeypatch):

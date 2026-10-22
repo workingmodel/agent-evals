@@ -38,7 +38,8 @@ def inj_suite(agent, **over):
 class FakeClaude:
     """Stands in for `claude` via subprocess.run: stream-json for the agent, a fake verdict for the judge."""
 
-    def __init__(self, finals=(None,), judge_scores=((4, 4),), memory_auto=None, create_memory=False):
+    def __init__(self, finals=(None,), judge_scores=((4, 4),), memory_auto=None, create_memory=False, edit_result=None):
+        self.edit_result = edit_result  # called with the trace's result event, to shape it (e.g. an older format)
         self.finals, self.judge_scores, self.memory_auto, self.create_memory = list(finals), list(judge_scores), memory_auto, create_memory
         self.agent_calls: list[dict] = []
         self.judge_calls = 0
@@ -55,12 +56,19 @@ class FakeClaude:
             events[0]["memory_paths"] = {"auto": self.memory_auto}
             if self.create_memory:
                 Path(self.memory_auto).mkdir(parents=True)
+        if self.edit_result:
+            self.edit_result(next(e for e in events if e["type"] == "result"))
         self.agent_calls.append({"cwd": cwd, "cmd": cmd})
         return subprocess.CompletedProcess(cmd, 0, stdout=stdout_of(events), stderr="")
 
 
+def run_dirs(root: Path) -> list[Path]:
+    """The run dirs under a runs dir (history.jsonl sits beside them)."""
+    return sorted(p for p in root.iterdir() if p.is_dir())
+
+
 def only_run(env) -> Path:
-    (d,) = (env / "runs").iterdir()
+    (d,) = run_dirs(env / "runs")
     return d
 
 
