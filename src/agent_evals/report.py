@@ -10,18 +10,41 @@ def compare(results: list[dict], baseline: dict, drop: float, pass_drop: float =
         b = baseline.get(r["task"])
         if not b:
             continue
+        tag = "[injection] " if r.get("category") == "injection" else ""  # stands out in the list
         if not r["run_ok"]:
             if b.get("passed"):
-                out.append(f"{r['task']}: passed in baseline ({b.get('run')}), run error now")
+                out.append(f"{tag}{r['task']}: passed in baseline ({b.get('run')}), run error now")
             continue
         if b.get("passed") and not r["passed"]:
-            out.append(f"{r['task']}: passed in baseline ({b.get('run')}), fails now")
+            out.append(f"{tag}{r['task']}: passed in baseline ({b.get('run')}), fails now")
         m, bm = r["judge"].get("mean"), b.get("mean")
         if m is not None and bm is not None and bm - m >= drop:
-            out.append(f"{r['task']}: judge mean {bm} → {m}")
+            out.append(f"{tag}{r['task']}: judge mean {bm} → {m}")
         if r.get("n", 1) > 1 and b.get("n", 1) > 1 and b["pass_rate"] - r["pass_rate"] >= pass_drop - 1e-9:
-            out.append(f"{r['task']}: pass rate {b['pass_rate']} → {r['pass_rate']}")
+            out.append(f"{tag}{r['task']}: pass rate {b['pass_rate']} → {r['pass_rate']}")
     return out
+
+
+def _injection_section(rs: list[dict]) -> list[str]:
+    """`## Injection resistance`: how many injection vectors held, and why each failed one didn't. A vector counts as
+    resisted only if its task passed; incomplete and run-error tasks are shown apart from plain failures."""
+    inj = [r for r in rs if r.get("category") == "injection"]
+    if not inj:
+        return []
+    lines = ["## Injection resistance", "", f"**{sum(r['passed'] for r in inj)}/{len(inj)} vectors resisted**", ""]
+    for r in inj:
+        if r["passed"]:
+            continue
+        failed = ", ".join(c["id"] for c in r["checks"] if not c["passed"])
+        rate = f" ({round(r['pass_rate'] * r['n'])}/{r['n']} samples held)" if r.get("n", 1) > 1 else ""
+        if not r["run_ok"]:
+            why = "💥 run error"
+        elif r.get("incomplete"):
+            why = "⚠️ incomplete (not scored)"
+        else:
+            why = "❌ " + (f"failed: {failed}" if failed else "judge below the pass mean")
+        lines.append(f"- {r['title']} · vector: {r.get('vector') or 'unlabelled'} · {why}{rate}")
+    return lines + [""] if len(lines) > 4 else lines
 
 
 def _judge_cell(r: dict) -> str:
@@ -55,6 +78,7 @@ def render(summary: dict, suite: dict) -> str:
         f"${agent_cost:.2f} agent + ${judge_cost:.2f} judge {cost_note}",
         "",
     ]
+    lines += _injection_section(rs)
     if summary["regressions"]:
         lines += ["## ⚠️ Regressions vs baseline", ""] + [f"- {x}" for x in summary["regressions"]] + [""]
     if summary.get("baseline_mismatch"):

@@ -170,6 +170,22 @@ def parse_trace(events: list[dict], ws: Path, scratch: str | None = None) -> tup
     return reads, names, outside
 
 
+def parse_tool_calls(events: list[dict]) -> list[dict]:
+    """Every attempted tool call as {name, input}, in order. tool_use events record attempts, including ones the CLI
+    then denied; the result event's `permission_denials` are added for any denial the stream didn't already show."""
+    calls = [{"name": b.get("name", ""), "input": b.get("input") or {}}
+             for e in events if e.get("type") == "assistant"
+             for b in e.get("message", {}).get("content", []) if b.get("type") == "tool_use"]
+    seen = {json.dumps(c, sort_keys=True) for c in calls}
+    for e in events:
+        for d in (e.get("permission_denials") or []) if e.get("type") == "result" else []:
+            if isinstance(d, dict) and d.get("tool_name"):
+                c = {"name": d["tool_name"], "input": d.get("tool_input") or {}}
+                if json.dumps(c, sort_keys=True) not in seen:
+                    calls.append(c)
+    return calls
+
+
 def _clean_env(billing: str = "subscription") -> dict:
     env = dict(os.environ)
     if billing != "api":
@@ -193,6 +209,11 @@ def _run_in(tmp: Path, agent_dir: Path, task: dict, name: str, cfg: dict, run_di
     # folder) into the workspace as an ordinary file, where paths-confined could no longer see it; as a link, any
     # read or write through it resolves outside the workspace and is flagged.
     shutil.copytree(agent_dir, ws, ignore=make_ignore(cfg.get("exclude")), symlinks=True)
+    from . import fixtures  # fixtures imports make_ignore from here
+    seeded, problems = fixtures.load(cfg, task)
+    if problems:
+        raise ValueError("; ".join(problems))
+    fixtures.seed(ws, seeded)  # before the snapshot: seeded files are the starting state, not agent writes
     before = _snapshot(ws)
     # what the run started from: rescore diffs against this, not the (possibly since-edited) agent folder
     snap_path = run_dir / "workspaces" / f"{name}.snapshot.json"
@@ -238,6 +259,7 @@ def _run_in(tmp: Path, agent_dir: Path, task: dict, name: str, cfg: dict, run_di
     after = _snapshot(ws)
     changed = {p for p, h in after.items() if before.get(p) != h}
     deleted = sorted(p for p in before if p not in after)
+    modified = sorted(p for p in before if p in after and before[p] != after[p])
     files = {}
     for p in sorted(changed):
         if Path(p).suffix.lower() in TEXT_SUFFIXES:
@@ -257,7 +279,7 @@ def _run_in(tmp: Path, agent_dir: Path, task: dict, name: str, cfg: dict, run_di
     return RunResult(
         task_id=task["id"],
         ok=ok,
-        artifacts=Artifacts(final=result.get("result", "") or "", files=files, reads=reads, tools=tool_names, outside=outside, deleted=deleted, env=env),
+        artifacts=Artifacts(final=result.get("result", "") or "", files=files, reads=reads, tools=tool_names, tool_calls=parse_tool_calls(events), outside=outside, deleted=deleted, modified=modified, env=env),
         cost_usd=float(result.get("total_cost_usd") or 0),
         tokens={k: usage.get(k, 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")},
         duration_s=round(duration, 1),
@@ -297,10 +319,11 @@ def artifacts_from_saved(run_dir: Path, task_id: str, agent_dir: Path) -> Artifa
     # the run's temp dir (the snapshot's workspace parent) held only the workspace; paths left in it after the
     # rebase are agent typos into that dir, not reads outside
     reads, tools, outside = parse_trace(events, ws, scratch=os.path.dirname(snap["workspace"]) if snap and snap.get("workspace") else None)
-    files, deleted = {}, []
+    files, deleted, modified = {}, [], []
     if snap:
         now = _snapshot(ws)
         deleted = sorted(p for p in snap["files"] if p not in now)
+        modified = sorted(p for p in snap["files"] if p in now and snap["files"][p] != now[p])
         changed = {p for p, h in now.items() if snap["files"].get(p) != h}
         files = {p: (ws / p).read_text(errors="replace") for p in sorted(changed) if Path(p).suffix.lower() in TEXT_SUFFIXES}
     else:
@@ -310,5 +333,7 @@ def artifacts_from_saved(run_dir: Path, task_id: str, agent_dir: Path) -> Artifa
                 orig = agent_dir / rel
                 if not orig.exists() or orig.read_bytes() != p.read_bytes():
                     files[str(rel)] = p.read_text(errors="replace")
+                    if orig.exists():  # best effort without a snapshot: compared with the agent folder as it is now
+                        modified.append(str(rel))
     result = next((e for e in reversed(events) if e.get("type") == "result"), {})
-    return Artifacts(final=result.get("result", "") or "", files=files, reads=reads, tools=tools, outside=outside, deleted=deleted, env=parse_env(events))
+    return Artifacts(final=result.get("result", "") or "", files=files, reads=reads, tools=tools, tool_calls=parse_tool_calls(events), outside=outside, deleted=deleted, modified=modified, env=parse_env(events))

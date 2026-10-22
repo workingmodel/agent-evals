@@ -52,7 +52,7 @@ def rows_for(summary: dict, run_dir: Path) -> list[dict]:
         judge = r.get("judge") or {}
         rows.append({
             "schema": SCHEMA, "run": run, "timestamp": ts.isoformat(timespec="seconds"), "iso_week": iso_week(ts),
-            "agent": summary.get("agent"), "task": r["task"],
+            "agent": summary.get("agent"), "task": r["task"], "category": r.get("category"), "vector": r.get("vector"),
             "model": r.get("model") or env.get("model"), "judge_model": r.get("judge_model"),
             "claude_version": env.get("claude_code_version"), "billing": summary.get("billing"),
             "agent_fingerprint": summary.get("agent_fingerprint"),

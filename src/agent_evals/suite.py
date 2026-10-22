@@ -12,6 +12,7 @@ from typing import Any
 
 import yaml
 
+from . import fixtures
 from .checks import CHECK_FIELDS
 
 
@@ -38,6 +39,7 @@ def load_suite(path: Path) -> dict:
         p = Path(suite["path"]).expanduser()
         # relative agent paths are relative to the suite file, so a suite runs from any CWD
         suite["path"] = str(p if p.is_absolute() else os.path.normpath(path.resolve().parent / p))
+    suite["_dir"] = str(path.resolve().parent)  # `files: {from: ...}` fixtures resolve against the suite file
     # suite-level `vars` fill {name} placeholders in task prompts (e.g. shared source excerpts)
     for task in suite.get("tasks") or []:
         if isinstance(task, dict) and isinstance(task.get("prompt"), str):
@@ -61,6 +63,9 @@ def task_hash(suite: dict, task: dict) -> str:
     suite's `copy_block` / `pass_mean` when they apply to this task (so default suites keep their hashes)."""
     checks = [{k: v for k, v in c.items() if k != "billing"} for c in task_checks(suite, task)]  # billing is a run option
     blob = {"prompt": task.get("prompt"), "checks": checks, "rubric": task.get("rubric") or [], "model": task.get("model", suite.get("model"))}
+    seeded = fixtures.load(suite, task)[0]
+    if seeded:  # resolved text, so editing a `from:` file invalidates the baseline entry
+        blob["files"] = seeded
     if suite.get("copy_block") and any(c.get("scope") == "copy_block" for c in checks):
         blob["copy_block"] = suite["copy_block"]
     if task.get("rubric") and suite.get("pass_mean", DEFAULT_PASS_MEAN) != DEFAULT_PASS_MEAN:
@@ -124,12 +129,17 @@ _KEY_RULES: dict[str, tuple[Callable[[Any], bool], str]] = {
     "confine_paths": (lambda v: isinstance(v, bool), "true or false"),
     "check_env": (lambda v: isinstance(v, bool), "true or false"),
 }
-_TASK_KEYS = ("model", "max_turns", "timeout_s")
+_TASK_RULES: dict[str, tuple[Callable[[Any], bool], str]] = {  # task-only keys
+    "category": (_is_text, "a non-empty string"),
+    "vector": (_is_text, "a non-empty string"),
+}
+_TASK_KEYS = ("model", "max_turns", "timeout_s", "min_pass_rate", "category", "vector")
 
 
 def _key_errors(d: dict, keys: Iterable[str], where: str) -> list[str]:
     """Type- and range-check the given keys of a suite or task mapping (a key present but null is invalid: the runner would read it as a value)."""
-    return [f"{where}`{k}` must be {_KEY_RULES[k][1]}" for k in keys if k in d and not _KEY_RULES[k][0](d[k])]
+    rules = _KEY_RULES | _TASK_RULES
+    return [f"{where}`{k}` must be {rules[k][1]}" for k in keys if k in d and not rules[k][0](d[k])]
 
 
 def _suite_key_errors(suite: dict) -> list[str]:
@@ -195,6 +205,7 @@ def validate_suite(suite: dict) -> list[str]:
         elif not isinstance(t["prompt"], str):
             errs.append(f"{where}: prompt must be a string")
         errs += _key_errors(t, _TASK_KEYS, f"{where}: ")
+        errs += [f"{where}: {e}" for e in fixtures.load(suite, t)[1]]
         errs += [e for c in t.get("checks") or [] for e in _check_errors(c, where)]
         errs += [f"{where}: skip_checks refers to unknown suite check `{s}`" for s in t.get("skip_checks") or [] if s not in suite_ids]
         rubric = t.get("rubric")
