@@ -8,6 +8,9 @@
     agent-evals rescore runs/<run>      # re-apply rule checks, zero tokens
     agent-evals history rebuild         # regenerate runs/history.jsonl from saved runs, zero tokens
     agent-evals history show --last 10  # recent runs, one line per task
+    agent-evals weekly                  # this week vs last, per agent and task, from history.jsonl, zero tokens
+    agent-evals weekly --agent tiny-writer --week 2026-W43 --vs 2026-W42
+    agent-evals weekly --agent tiny-writer --by-version   # latest agent fingerprint vs the one before it
     agent-evals validate suites/*.yaml  # check suites, zero tokens
     agent-evals doctor                  # check the claude CLI, zero tokens
 
@@ -29,7 +32,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, history, telemetry
+from . import __version__, history, telemetry, weekly
 from .checks import run_checks
 from .judge import judge
 from .report import compare, render
@@ -203,7 +206,19 @@ def main(argv: list[str] | None = None) -> int:
     hw.add_argument("--last", type=int, default=20, metavar="N")
     for hp in (hb, hw):
         hp.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    wk = sub.add_parser("weekly", help="weekly before/after report from history.jsonl (zero tokens)")
+    wk.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    wk.add_argument("--agent", help="only this agent (required with --by-version)")
+    wk.add_argument("--week", metavar="YYYY-Www", help="week to report (default: latest in the history)")
+    wk.add_argument("--vs", metavar="YYYY-Www", help="week to compare against (default: the week before --week)")
+    wk.add_argument("--out", type=Path, help="markdown path (default <runs-dir>/weekly/<week>[-<agent>].md); JSON goes next to it")
+    wk.add_argument("--by-version", action="store_true", help="ignore weeks: compare the agent's latest fingerprint with the one before it")
+    wk.add_argument("--cost-threshold", type=float, default=0.2, metavar="F", help="flag cost/tokens per sample moving by this fraction (0.2)")
+    wk.add_argument("--latency-threshold", type=float, default=0.25, metavar="F", help="flag p95 wall/API latency moving by this fraction (0.25)")
+    wk.add_argument("--judge-drop", type=float, default=0.25, metavar="X", help="flag a judge mean move of this much (0.25)")
     args = ap.parse_args(argv)
+    if args.cmd == "weekly":
+        return weekly_cmd(args)
     if args.cmd == "rescore":
         return rescore(args.run_dir, args.update_baseline, args.suite, args.baselines_dir)
     if args.cmd == "validate":
@@ -334,6 +349,44 @@ def history_cmd(args) -> int:
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
     print(f"{args.runs_dir / history.NAME}: {rows} rows from {runs} runs")
+    return 0
+
+
+def weekly_cmd(args) -> int:
+    path = args.runs_dir / history.NAME
+    if not path.is_file():
+        print(f"error: {path} not found; run `agent-evals history rebuild --runs-dir {args.runs_dir}` to build it from saved runs", file=sys.stderr)
+        return 2
+    if args.by_version and not args.agent:
+        print("error: --by-version needs --agent", file=sys.stderr)
+        return 2
+    if min(args.cost_threshold, args.latency_threshold, args.judge_drop) < 0:
+        print("error: thresholds must be >= 0", file=sys.stderr)
+        return 2
+    th = weekly.thresholds(args.cost_threshold, args.latency_threshold, args.judge_drop)
+    rows = history.load(args.runs_dir)
+    try:
+        if not rows:
+            raise weekly.WeeklyError(f"{path} is empty; run `agent-evals history rebuild` after some runs exist")
+        data = weekly.build_by_version(rows, args.agent, th) if args.by_version else weekly.build_weeks(rows, args.agent, args.week, args.vs, th)
+    except weekly.WeeklyError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if data.get("single"):
+        print(f"{args.agent} has only one agent fingerprint in the history ({data['single']}); nothing to compare. "
+              "Edit the agent's instructions and run again, or use `weekly` to compare weeks.")
+        return 0
+    if args.out:
+        md = args.out
+    else:
+        stem = f"by-version-{args.agent}" if args.by_version else f"{data['week']}-{args.agent}" if args.agent else data["week"]
+        md = args.runs_dir / "weekly" / f"{stem}.md"
+    js = md.with_name(md.name + ".json") if md.suffix == ".json" else md.with_suffix(".json")
+    md.parent.mkdir(parents=True, exist_ok=True)
+    md.write_text(weekly.render(data))
+    js.write_text(json.dumps(data, indent=2) + "\n")
+    print(f"{md}  (data: {js})")
+    print("\n".join(weekly.summary_lines(data)))
     return 0
 
 
