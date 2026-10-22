@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-22
+
+Prompt-injection testing, run telemetry and history, and a weekly before/after report.
+
 ### Added
 
 - Per-task telemetry in `results.json`: `latency` (`wall_s`, `api_s`, `ttft_s`), `telemetry` (thinking tokens, 1h and 5m cache writes, web search and fetch requests, permission denials), `model_cost`, and the cost split `agent_cost_usd` / `judge_cost_usd` (`cost_usd` stays the combined total). Fields an older Claude Code doesn't report are `null`, never 0. Repeated tasks sum counters and costs and report mean/min/max latency. `rescore` re-derives them from the saved traces.

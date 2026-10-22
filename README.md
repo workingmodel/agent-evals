@@ -20,6 +20,11 @@ For each golden task in a suite, agent-evals:
 4. **Saves a trace.** Every event goes to `runs/<run>/traces/`. Cost, tokens, turns, latency and a few other counters are recorded per task, and each run adds a line to a [history file](#telemetry-and-history).
 5. **Compares with a baseline.** `--update-baseline` saves the current results. `--gate` exits non-zero if a later run regressed.
 
+It also ships two things built on top of that:
+
+- **Prompt-injection testing.** Plant poisoned files or pasted text in a task, check the agent didn't act on them, and get an injection-resistance score in the report. A 12-attack example pack is included. See [Testing prompt injection](#testing-prompt-injection).
+- **A weekly before/after report.** `agent-evals weekly` compares this week with last, per agent and per task: pass rate, judge score, injection resistance, tokens, cost and latency, with flags on what moved. It reads only the history file, so it costs nothing. See [Weekly before/after](#weekly-beforeafter).
+
 ## Prerequisites
 
 - Python 3.11 or newer
