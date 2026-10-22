@@ -31,17 +31,28 @@ def _judge_cell(r: dict) -> str:
     return f"{m} ± {r['judge']['stdev']}" if r.get("n", 1) > 1 and r["judge"].get("stdev") is not None else str(m)
 
 
+def _secs_cell(r: dict, key: str) -> str:
+    v = (r.get("latency") or {}).get(key)
+    return f"{v:.1f}s" if isinstance(v, (int, float)) else "—"
+
+
+def _cost_split(r: dict) -> tuple[float, float]:
+    """(agent, judge) cost; results saved before the split derive the agent half from the combined cost."""
+    judge = r.get("judge_cost_usd", (r.get("judge") or {}).get("cost_usd") or 0) or 0
+    return (r["agent_cost_usd"] if r.get("agent_cost_usd") is not None else r["cost_usd"] - judge), judge
+
+
 def render(summary: dict, suite: dict) -> str:
     rs = summary["results"]
     passed = sum(r["passed"] for r in rs)
-    cost = sum(r["cost_usd"] for r in rs)
+    agent_cost, judge_cost = (sum(x) for x in zip(*map(_cost_split, rs), strict=False)) if rs else (0.0, 0.0)
     secs = sum(r["duration_s"] for r in rs)
     cost_note = "billed to API" if summary.get("billing") == "api" else "notional (billed to subscription, not API)"
     lines = [
         f"# Eval report — {summary['agent']}",
         "",
         f"Run `{summary['run']}` · **{passed}/{len(rs)} tasks passed** · {secs:.0f}s total · "
-        f"${cost:.2f} {cost_note}",
+        f"${agent_cost:.2f} agent + ${judge_cost:.2f} judge {cost_note}",
         "",
     ]
     if summary["regressions"]:
@@ -49,7 +60,7 @@ def render(summary: dict, suite: dict) -> str:
     if summary.get("baseline_mismatch"):
         lines += ["## ⚠️ Baseline mismatch", "", "The baseline was produced by something different; the comparison may not be like for like.", ""]
         lines += [f"- {x}" for x in summary["baseline_mismatch"]] + [""]
-    lines += ["| Task | Result | Rule checks | Judge (1–5) | Turns | Time | Tokens in/out |", "|---|---|---|---|---|---|---|"]
+    lines += ["| Task | Result | Rule checks | Judge (1–5) | Turns | Time | API | TTFT | Tokens in/out |", "|---|---|---|---|---|---|---|---|---|"]
     for r in rs:
         tok = r["tokens"]
         tin = tok.get("input_tokens", 0) + tok.get("cache_read_input_tokens", 0) + tok.get("cache_creation_input_tokens", 0)
@@ -57,7 +68,7 @@ def render(summary: dict, suite: dict) -> str:
         if r.get("n", 1) > 1:
             res += f" ({round(r['pass_rate'] * r['n'])}/{r['n']})"
         lines.append(f"| {r['title']} | {res} | {r['checks_passed']}/{r['checks_total']} | {_judge_cell(r)} "
-                     f"| {r['turns']} | {r['duration_s']}s | {tin:,}/{tok.get('output_tokens', 0):,} |")
+                     f"| {r['turns']} | {r['duration_s']}s | {_secs_cell(r, 'api_s')} | {_secs_cell(r, 'ttft_s')} | {tin:,}/{tok.get('output_tokens', 0):,} |")
     for r in rs:
         lines += ["", f"## {r['title']}", ""]
         if r["error"]:

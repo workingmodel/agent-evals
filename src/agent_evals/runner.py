@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .checks import Artifacts
+from .telemetry import from_result
 
 _SKIP = (".git", "node_modules", ".venv", "runs", "*.png", "*.jpg", "*.jpeg", "*.gif", "*.pdf", "*.mp4", "*.zip",
          ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_ed25519*", "settings.local.json",
@@ -55,6 +56,7 @@ class RunResult:
     duration_s: float = 0.0
     num_turns: int = 0
     error: str = ""
+    metrics: dict = field(default_factory=dict)  # latency / telemetry / model_cost, see telemetry.py
 
 
 def _names(items) -> list[str]:
@@ -72,6 +74,32 @@ def parse_env(events: list[dict]) -> dict:
         "plugins": _names(p for p in init.get("plugins") or [] if not isinstance(p, dict) or p.get("path") != "builtin"),
         "memory_paths": init.get("memory_paths") or {}, "cwd": init.get("cwd"),
     }
+
+
+INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md")
+
+
+def agent_fingerprint(agent_dir: Path, globs: list[str] | None = None, exclude: list[str] | None = None) -> str:
+    """Short sha256 of the agent's instruction files: every CLAUDE.md / CLAUDE.local.md and everything under a
+    `.claude/` dir, or the files matching `globs` (paths relative to the agent folder). Hashed over sorted relative
+    paths and content; the workspace-copy skip list applies, so secrets and VCS junk never count."""
+    ignore, root = make_ignore(exclude), Path(agent_dir)
+    found = []
+    for dirpath, dirs, files in os.walk(root):
+        skip = ignore(dirpath, dirs + files)
+        dirs[:] = [d for d in dirs if d not in skip]
+        for f in files:
+            full = Path(dirpath, f)
+            if f in skip or full.is_symlink():
+                continue
+            rel = full.relative_to(root).as_posix()
+            hit = any(fnmatch.fnmatchcase(rel, g) for g in globs) if globs is not None else (f in INSTRUCTION_FILES or ".claude" in rel.split("/")[:-1])
+            if hit:
+                found.append((rel, full))
+    h = hashlib.sha256()
+    for rel, full in sorted(found):
+        h.update(rel.encode() + b"\0" + full.read_bytes() + b"\0")
+    return h.hexdigest()[:12]
 
 
 def _projects_root() -> Path:
@@ -234,6 +262,7 @@ def _run_in(tmp: Path, agent_dir: Path, task: dict, name: str, cfg: dict, run_di
         tokens={k: usage.get(k, 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")},
         duration_s=round(duration, 1),
         num_turns=int(result.get("num_turns") or 0),
+        metrics=from_result(result, round(duration, 1)),
         error="" if ok else (result.get("result") or stderr or "no result event")[:500],
     )
 
