@@ -3,6 +3,20 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Per-task telemetry in `results.json`: `latency` (`wall_s`, `api_s`, `ttft_s`), `telemetry` (thinking tokens, 1h and 5m cache writes, web search and fetch requests, permission denials), `model_cost`, and the cost split `agent_cost_usd` / `judge_cost_usd` (`cost_usd` stays the combined total). Fields an older Claude Code doesn't report are `null`, never 0. Repeated tasks sum counters and costs and report mean/min/max latency. `rescore` re-derives them from the saved traces.
+- `agent_fingerprint` per run: a short sha256 of the agent's `CLAUDE.md` / `CLAUDE.local.md` files and `.claude/` tree. The suite key `fingerprint: [glob, ...]` overrides the file set.
+- `<runs-dir>/history.jsonl`: one line per task per run, appended by `run` and replaced by `rescore`. Never fails a run.
+- `agent-evals history rebuild` regenerates the history from saved runs (zero tokens, idempotent). `agent-evals history show` prints a compact table.
+- Report: `API` and `TTFT` columns, and the header splits cost into agent and judge.
+
+### Changed
+
+- The runs dir now holds `history.jsonl` next to the run dirs.
+
 ## [0.2.3] - 2026-10-21
 
 ### Fixed

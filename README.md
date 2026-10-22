@@ -17,7 +17,7 @@ For each golden task in a suite, agent-evals:
 1. **Runs the agent headless.** It copies the agent's folder into a temp workspace and runs `claude -p` from there. Your real files are never touched.
 2. **Applies rule checks.** Zero tokens. Banned words, required format, files read, files written, and more. See [Check types](#check-types).
 3. **Asks an LLM judge.** A separate model scores the output 1 to 5 against a per-task rubric. The agent's output is treated as untrusted data.
-4. **Saves a trace.** Every event goes to `runs/<run>/traces/`. Cost, tokens, turns and wall-clock time are recorded per task.
+4. **Saves a trace.** Every event goes to `runs/<run>/traces/`. Cost, tokens, turns, latency and a few other counters are recorded per task, and each run adds a line to a [history file](#telemetry-and-history).
 5. **Compares with a baseline.** `--update-baseline` saves the current results. `--gate` exits non-zero if a later run regressed.
 
 ## Prerequisites
@@ -106,6 +106,7 @@ A suite is one YAML file. Run `validate` to check it before spending tokens.
 | `allow_outside` | list of strings | `[]` | Path prefixes `paths-confined` tolerates. `~` is expanded. |
 | `check_env` | bool | `true` | `false` turns off the built-in `clean-env` check. |
 | `exclude` | list of strings | `[]` | Extra file-name globs left out of the workspace copy. |
+| `fingerprint` | list of strings | instruction files | Globs (relative to the agent folder) that define the agent fingerprint. See [Telemetry and history](#telemetry-and-history). |
 | `allowed_tools` | list | `Read, Glob, Grep, Write, Edit` | Tools the agent may use. |
 | `disallowed_tools` | list | `Bash, WebSearch, WebFetch, Task` | Tools the agent may not use. |
 
@@ -117,7 +118,7 @@ A suite is one YAML file. Run `validate` to check it before spending tokens.
 - `copy_block` is a list of exactly two non-empty strings.
 - `vars` is a mapping of string names to string or number values.
 - `agent`, `path`, `model` and `judge_model` are non-empty strings.
-- `allowed_tools`, `disallowed_tools`, `exclude` and `allow_outside` are lists of strings.
+- `allowed_tools`, `disallowed_tools`, `exclude`, `fingerprint` and `allow_outside` are lists of strings.
 - `setting_sources` is a comma-separated string of `user`, `project`, `local`. `confine_paths` and `check_env` are `true` or `false`.
 
 A key that is present but empty (`pass_mean:` with no value) is invalid. A tool name that doesn't exist is not caught: Claude Code decides that at run time.
@@ -256,6 +257,29 @@ If a later `run` or `rescore` differs from the baseline in `model`, `judge_model
 
 The shipped `baselines/tiny-writer.json` was recorded on a specific Claude Code version. If yours differs you'll see a `WARN baseline mismatch` for `claude_version`. That's expected and harmless: it never fails the gate. Record your own with `--update-baseline`.
 
+## Telemetry and history
+
+Each task in `results.json` carries, besides `cost_usd`, `tokens`, `duration_s` and `turns`:
+
+| Field | Meaning |
+|---|---|
+| `latency` | `{"wall_s", "api_s", "ttft_s"}`: wall clock, time in API calls, and time to first token. `null` when the Claude Code version doesn't report it. Never 0 as a stand-in. |
+| `telemetry` | `thinking_tokens`, `cache_write_1h`, `cache_write_5m`, `web_search_requests`, `web_fetch_requests`, `permission_denials` (a count). Each is `null` when not reported. |
+| `model_cost` | `{model: cost_usd}` from the result event's per-model usage. |
+| `agent_cost_usd`, `judge_cost_usd` | The two halves of `cost_usd`, which stays the combined total. |
+
+With `--repeat N` the counters and costs are summed over samples. `latency` holds the mean of each value, plus `min` and `max` mappings; the per-sample values stay under `samples`. `rescore` re-derives all of this from the saved traces, so older runs gain the fields where their trace has them. `agent_evals.telemetry.percentile` is a small helper for p50/p95 over such values.
+
+The run also records `agent_fingerprint`: the first 12 hex characters of a sha256 over the agent's instruction files, computed from the agent folder when the run starts. By default that is every `CLAUDE.md` and `CLAUDE.local.md` in the folder plus everything under any `.claude/` directory (skills, agents, commands, settings, rules), hashed over sorted relative paths and content. The workspace-copy skip list applies, so secrets, `.env` files and binaries never count. Set the suite key `fingerprint: [glob, ...]` to hash a different set instead (globs match paths relative to the agent folder, and `*` also crosses `/`). Two runs with the same fingerprint used the same instructions.
+
+### History
+
+`run` appends one JSON line per task to `<runs-dir>/history.jsonl` (schema 1): run, timestamp (local time with offset), `iso_week`, agent, task, model, judge model, Claude Code version, billing, `agent_fingerprint`, `n`, `passed`, `pass_rate`, `incomplete`, `run_ok`, `judge_mean`, tokens, `agent_cost_usd`, `judge_cost_usd`, latency, and turns. It sits next to the run dirs, so like them it is gitignored and private. `rescore` replaces that run's lines when the file exists. Writing history never fails a run: an error is a warning.
+
+`agent-evals history rebuild [--runs-dir runs]` regenerates the file from every `runs/*/results.json`, plus the saved traces for fields an older results file lacks. Zero tokens, no rescoring, sorted by run time, and running it twice gives identical bytes. Unreadable runs are skipped with a warning.
+
+`agent-evals history show [--agent NAME] [--last N]` prints the most recent lines as a table (run, task, result, judge mean, cost, wall/API/TTFT, tokens in/out).
+
 ## Commands
 
 ### `run <suite>`
@@ -286,6 +310,10 @@ Changed and deleted files are diffed against a snapshot taken when the run start
 ### `validate <suite>...`
 
 Checks suite files and that each agent `path` exists. Zero tokens. Exit 0 or 2.
+
+### `history rebuild` / `history show`
+
+See [History](#history). Both take `--runs-dir DIR` (default `./runs`); `show` also takes `--agent NAME` and `--last N` (default 20). Zero tokens.
 
 ### `doctor`
 
