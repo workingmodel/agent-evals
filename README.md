@@ -67,13 +67,16 @@ uv run agent-evals validate examples/suites/tiny-writer.yaml       # suite and a
 uv run agent-evals run examples/suites/tiny-writer.yaml            # runs the agent and the judge
 uv run agent-evals run examples/suites/tiny-writer.yaml --repeat 3 # each task three times
 uv run agent-evals run examples/suites/tiny-writer.yaml --repeat 3 --gate  # exit 1 on regression
+uv run agent-evals run examples/suites/injection.yaml              # the 12-attack injection pack
+uv run agent-evals history show                                    # recent runs, one line per task. Zero tokens.
+uv run agent-evals weekly                                          # this week vs last. Zero tokens.
 ```
 
-`doctor` and `validate` cost nothing. The `run` commands spend tokens. At today's notional prices a task costs about $0.09 per sample, judge included. That varies with the model, the task and the agent's folder, so treat it as a ballpark. To try the rule checks alone, add `--no-judge`.
+`doctor`, `validate`, `history` and `weekly` cost nothing. The `run` commands spend tokens. At today's notional prices a task costs about $0.09 per sample, judge included. That varies with the model, the task and the agent's folder, so treat it as a ballpark. To try the rule checks alone, add `--no-judge`.
 
 The example agent in [`examples/agents/tiny-writer`](https://github.com/workingmodel/agent-evals/tree/main/examples/agents/tiny-writer) is fictional and self-contained. A suite's relative `path` resolves against the suite file's directory, so the commands work from any CWD.
 
-Each run writes `runs/<timestamp>-<agent>-<id>/` with `report.md`, `results.json`, `traces/` and `workspaces/`. Open `report.md` first.
+Each run writes `runs/<timestamp>-<agent>-<id>/` with `report.md`, `results.json`, `traces/` and `workspaces/`, and adds a line per task to `runs/history.jsonl`. Open `report.md` first.
 
 ## Billing
 
